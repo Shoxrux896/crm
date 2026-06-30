@@ -1,128 +1,598 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase'
-import type { Deal, Contact } from '@/lib/type'
+import type { Contact, Deal, DealLog, PipelineStatus } from '@/lib/type'
 
-const STATUSES: { key: Deal['status']; label: string }[] = [
-  { key: 'new', label: 'Новая' },
-  { key: 'in_progress', label: 'В работе' },
-  { key: 'closed', label: 'Закрыта' },
-]
+const NULL_COL = '__unassigned__'
 
 export default function DealsPage() {
   const supabase = createClient()
+
+  const [statuses, setStatuses] = useState<PipelineStatus[]>([])
   const [deals, setDeals] = useState<Deal[]>([])
   const [contacts, setContacts] = useState<Contact[]>([])
   const [loading, setLoading] = useState(true)
-  const [showForm, setShowForm] = useState(false)
 
-  const [title, setTitle] = useState('')
-  const [amount, setAmount] = useState('')
-  const [contactId, setContactId] = useState('')
+  // deal form
+  const [showDealForm, setShowDealForm] = useState(false)
+  const [dealTitle, setDealTitle] = useState('')
+  const [dealAmount, setDealAmount] = useState('')
+  const [dealContactId, setDealContactId] = useState('')
+  const [dealStatusId, setDealStatusId] = useState('')
 
-  const loadData = async () => {
-    setLoading(true)
-    const [dealsRes, contactsRes] = await Promise.all([
-      supabase.from('deals').select('*').order('created_at', { ascending: false }),
-      supabase.from('contacts').select('*'),
-    ])
-    setDeals(dealsRes.data || [])
-    setContacts(contactsRes.data || [])
-    setLoading(false)
-  }
+  // column form
+  const [showColForm, setShowColForm] = useState(false)
+  const [colName, setColName] = useState('')
 
+  // inline column rename
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameVal, setRenameVal] = useState('')
+
+  // drag state — ref avoids re-renders while dragging
+  const dragDealId = useRef<string | null>(null)
+  const dragging = useRef(false)
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null)
+
+  // deal detail modal + logs
+  const [selectedDeal, setSelectedDeal] = useState<Deal | null>(null)
+  const [logs, setLogs] = useState<DealLog[]>([])
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [newNote, setNewNote] = useState('')
+
+  // columns in display order
+  const sorted = [...statuses].sort((a, b) => a.position - b.position)
+
+  // ── Initial load ──────────────────────────────────────────────
   useEffect(() => {
-    void loadData()
+    async function init() {
+      setLoading(true)
+      const [statusRes, dealsRes, contactsRes] = await Promise.all([
+        supabase.from('pipeline_statuses').select('*').order('position'),
+        supabase.from('deals').select('*').order('created_at', { ascending: false }),
+        supabase.from('contacts').select('*'),
+      ])
+      setStatuses(statusRes.data ?? [])
+      setDeals(dealsRes.data ?? [])
+      setContacts(contactsRes.data ?? [])
+      setLoading(false)
+    }
+    void init()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const resetForm = () => {
-    setTitle(''); setAmount(''); setContactId(''); setShowForm(false)
+  // ── Helpers ───────────────────────────────────────────────────
+  const contactName = (id: string | null) =>
+    contacts.find(c => c.id === id)?.name ?? '—'
+
+  const statusName = (id: string | null) =>
+    statuses.find(s => s.id === id)?.name ?? 'Без статуса'
+
+  const formatDate = (iso: string) =>
+    new Date(iso).toLocaleString('ru-RU', {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    })
+
+  // ── Deal modal / logs ─────────────────────────────────────────
+  const openDealModal = async (deal: Deal) => {
+    setSelectedDeal(deal)
+    setNewNote('')
+    setLogsLoading(true)
+    const { data } = await supabase
+      .from('deal_logs')
+      .select('*')
+      .eq('deal_id', deal.id)
+      .order('created_at', { ascending: true })
+    setLogs(data ?? [])
+    setLogsLoading(false)
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const closeModal = () => {
+    setSelectedDeal(null)
+    setLogs([])
+    setNewNote('')
+  }
+
+  const addLog = async () => {
+    if (!newNote.trim() || !selectedDeal) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const { data, error } = await supabase
+      .from('deal_logs')
+      .insert({ deal_id: selectedDeal.id, user_id: user.id, content: newNote.trim() })
+      .select()
+      .single()
+    if (!error && data) {
+      setLogs(prev => [...prev, data as DealLog])
+      setNewNote('')
+    }
+  }
+
+  const deleteLog = async (logId: string) => {
+    setLogs(prev => prev.filter(l => l.id !== logId))
+    await supabase.from('deal_logs').delete().eq('id', logId)
+  }
+
+  // ── Deal status change (optimistic) ──────────────────────────
+  const changeDealStatus = async (dealId: string, newStatusId: string | null) => {
+    setDeals(prev =>
+      prev.map(d => (d.id === dealId ? { ...d, status_id: newStatusId } : d))
+    )
+    const { error } = await supabase
+      .from('deals')
+      .update({ status_id: newStatusId })
+      .eq('id', dealId)
+    if (error) {
+      const { data } = await supabase
+        .from('deals')
+        .select('*')
+        .order('created_at', { ascending: false })
+      setDeals(data ?? [])
+    } else {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        const name = statusName(newStatusId)
+        const { data: logData } = await supabase
+          .from('deal_logs')
+          .insert({ deal_id: dealId, user_id: user.id, content: `🔄 Статус изменен на "${name}"` })
+          .select()
+          .single()
+        if (logData && selectedDeal?.id === dealId) {
+          setLogs(prev => [...prev, logData as DealLog])
+        }
+      }
+    }
+  }
+
+  // ── Drag-and-drop handlers ────────────────────────────────────
+  const handleDragStart = (dealId: string) => {
+    dragDealId.current = dealId
+    dragging.current = true
+  }
+
+  const handleDrop = (colId: string) => {
+    const id = dragDealId.current
+    dragDealId.current = null
+    setDragOverCol(null)
+    if (!id) return
+    void changeDealStatus(id, colId === NULL_COL ? null : colId)
+  }
+
+  // ── Column CRUD (all optimistic) ──────────────────────────────
+  const addColumn = async (e: React.FormEvent) => {
     e.preventDefault()
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-
-    await supabase.from('deals').insert({
-      title,
-      amount: Number(amount) || 0,
-      contact_id: contactId || null,
-      status: 'new',
-      user_id: user.id,
-    })
-    resetForm()
-    loadData()
+    const nextPos = statuses.length
+      ? Math.max(...statuses.map(s => s.position)) + 1
+      : 0
+    const { data, error } = await supabase
+      .from('pipeline_statuses')
+      .insert({ name: colName.trim(), position: nextPos, user_id: user.id })
+      .select()
+      .single()
+    if (!error && data) setStatuses(prev => [...prev, data as PipelineStatus])
+    setColName('')
+    setShowColForm(false)
   }
 
-  const moveStatus = async (deal: Deal, direction: 1 | -1) => {
-    const idx = STATUSES.findIndex(s => s.key === deal.status)
-    const newIdx = idx + direction
-    if (newIdx < 0 || newIdx >= STATUSES.length) return
-    await supabase.from('deals').update({ status: STATUSES[newIdx].key }).eq('id', deal.id)
-    loadData()
+  const renameColumn = async (id: string) => {
+    const name = renameVal.trim()
+    if (!name) return
+    setStatuses(prev => prev.map(s => (s.id === id ? { ...s, name } : s)))
+    setRenamingId(null)
+    await supabase.from('pipeline_statuses').update({ name }).eq('id', id)
   }
 
-  const handleDelete = async (id: string) => {
+  const deleteColumn = async (id: string) => {
+    if (!confirm('Удалить колонку? Сделки в ней потеряют статус.')) return
+    setStatuses(prev => prev.filter(s => s.id !== id))
+    setDeals(prev => prev.map(d => (d.status_id === id ? { ...d, status_id: null } : d)))
+    await supabase.from('pipeline_statuses').delete().eq('id', id)
+  }
+
+  const moveColumn = async (status: PipelineStatus, dir: 1 | -1) => {
+    const idx = sorted.findIndex(s => s.id === status.id)
+    const swapIdx = idx + dir
+    if (swapIdx < 0 || swapIdx >= sorted.length) return
+    const other = sorted[swapIdx]
+    setStatuses(prev =>
+      prev.map(s => {
+        if (s.id === status.id) return { ...s, position: other.position }
+        if (s.id === other.id) return { ...s, position: status.position }
+        return s
+      })
+    )
+    await Promise.all([
+      supabase.from('pipeline_statuses').update({ position: other.position }).eq('id', status.id),
+      supabase.from('pipeline_statuses').update({ position: status.position }).eq('id', other.id),
+    ])
+  }
+
+  // ── Deal CRUD (all optimistic) ────────────────────────────────
+  const resetDealForm = () => {
+    setDealTitle('')
+    setDealAmount('')
+    setDealContactId('')
+    setDealStatusId('')
+    setShowDealForm(false)
+  }
+
+  const addDeal = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const { data, error } = await supabase
+      .from('deals')
+      .insert({
+        title: dealTitle,
+        amount: Number(dealAmount) || 0,
+        contact_id: dealContactId || null,
+        status_id: dealStatusId || null,
+        user_id: user.id,
+      })
+      .select()
+      .single()
+    if (!error && data) {
+      setDeals(prev => [data as Deal, ...prev])
+      await supabase
+        .from('deal_logs')
+        .insert({ deal_id: data.id, user_id: user.id, content: '📦 Сделка создана' })
+    }
+    resetDealForm()
+  }
+
+  const deleteDeal = async (id: string) => {
     if (!confirm('Удалить сделку?')) return
+    if (selectedDeal?.id === id) closeModal()
+    setDeals(prev => prev.filter(d => d.id !== id))
     await supabase.from('deals').delete().eq('id', id)
-    loadData()
   }
 
-  const contactName = (id: string | null) => contacts.find(c => c.id === id)?.name || '—'
-
-  return (
-    <div>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Сделки</h1>
-        <button onClick={() => setShowForm(true)} className="rounded bg-black px-4 py-2 text-white">
-          + Добавить
+  // ── Shared deal card ──────────────────────────────────────────
+  const DealCard = ({ deal }: { deal: Deal }) => (
+    <div
+      draggable
+      onDragStart={() => handleDragStart(deal.id)}
+      onDragEnd={() => { dragging.current = false }}
+      onClick={() => {
+        if (dragging.current) { dragging.current = false; return }
+        void openDealModal(deal)
+      }}
+      className="cursor-pointer rounded-lg border bg-white p-3 shadow-sm transition-shadow hover:shadow-md active:cursor-grabbing"
+    >
+      <p className="font-medium text-gray-900">{deal.title}</p>
+      <p className="text-sm text-gray-500">{contactName(deal.contact_id)}</p>
+      <p className="mt-1 text-sm font-semibold text-gray-700">{deal.amount.toLocaleString()} сум</p>
+      <div className="mt-2 flex justify-end">
+        <button
+          onClick={e => { e.stopPropagation(); void deleteDeal(deal.id) }}
+          className="text-xs text-red-500 hover:underline"
+        >
+          Удал.
         </button>
       </div>
+    </div>
+  )
 
-      {showForm && (
-        <form onSubmit={handleSubmit} className="mb-6 space-y-3 rounded border bg-gray-50 p-4">
-          <input className="w-full rounded border px-3 py-2" placeholder="Название сделки" value={title} onChange={e => setTitle(e.target.value)} required />
-          <input className="w-full rounded border px-3 py-2" type="number" placeholder="Сумма" value={amount} onChange={e => setAmount(e.target.value)} />
-          <select className="w-full rounded border px-3 py-2" value={contactId} onChange={e => setContactId(e.target.value)}>
+  // ── Render ────────────────────────────────────────────────────
+  return (
+    <div>
+      {/* ── Deal Detail Modal ─────────────────────────────────── */}
+      {selectedDeal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
+          onClick={e => { if (e.target === e.currentTarget) closeModal() }}
+        >
+          <div className="relative flex h-[82vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+
+            {/* Modal header */}
+            <div className="flex items-start justify-between border-b px-6 py-4">
+              <div className="min-w-0 flex-1 pr-4">
+                <h2 className="truncate text-lg font-semibold text-gray-900">{selectedDeal.title}</h2>
+                <p className="mt-0.5 text-sm text-gray-500">
+                  {contactName(selectedDeal.contact_id)} · {selectedDeal.amount.toLocaleString()} сум
+                </p>
+                <span className="mt-1.5 inline-block rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
+                  {statusName(selectedDeal.status_id)}
+                </span>
+              </div>
+              <button
+                onClick={closeModal}
+                aria-label="Закрыть"
+                className="flex-shrink-0 rounded-full p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Log list */}
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
+                История заметок
+              </p>
+
+              {logsLoading ? (
+                <p className="text-sm text-gray-400">Загрузка...</p>
+              ) : logs.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 text-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="16" y1="13" x2="8" y2="13" />
+                    <line x1="16" y1="17" x2="8" y2="17" />
+                    <polyline points="10 9 9 9 8 9" />
+                  </svg>
+                  <p className="text-sm text-gray-400">Заметок пока нет.</p>
+                  <p className="mt-0.5 text-xs text-gray-300">Добавьте первую ниже.</p>
+                </div>
+              ) : (
+                <ul className="space-y-3">
+                  {logs.map(log => (
+                    <li key={log.id} className="group flex items-start gap-3">
+                      <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-gray-900 text-xs font-bold text-white">
+                        N
+                      </div>
+                      <div className="flex-1 rounded-lg border bg-gray-50 px-3 py-2.5">
+                        <p className="whitespace-pre-wrap text-sm text-gray-800">{log.content}</p>
+                        <p className="mt-1.5 text-xs text-gray-400">{formatDate(log.created_at)}</p>
+                      </div>
+                      <button
+                        onClick={() => void deleteLog(log.id)}
+                        aria-label="Удалить заметку"
+                        className="mt-1 flex-shrink-0 rounded-md p-1 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                          <path d="M10 11v6" />
+                          <path d="M14 11v6" />
+                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                        </svg>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Add note footer */}
+            <div className="border-t bg-gray-50 px-6 py-4">
+              <textarea
+                rows={3}
+                placeholder="Напишите заметку или обновление по сделке…"
+                value={newNote}
+                onChange={e => setNewNote(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault()
+                    void addLog()
+                  }
+                }}
+                className="w-full resize-none rounded-lg border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-black"
+              />
+              <div className="mt-2 flex items-center justify-between">
+                <p className="text-xs text-gray-400">Ctrl + Enter — быстрая отправка</p>
+                <button
+                  onClick={() => void addLog()}
+                  disabled={!newNote.trim()}
+                  className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-gray-800 disabled:opacity-40"
+                >
+                  Добавить заметку
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Page header ───────────────────────────────────────── */}
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Сделки</h1>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowColForm(true)}
+            className="rounded border px-4 py-2 text-sm hover:bg-gray-50 transition-colors"
+          >
+            + Колонка
+          </button>
+          <button
+            onClick={() => setShowDealForm(true)}
+            className="rounded bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 transition-colors"
+          >
+            + Сделка
+          </button>
+        </div>
+      </div>
+
+      {/* ── Add column form ───────────────────────────────────── */}
+      {showColForm && (
+        <form onSubmit={addColumn} className="mb-4 flex gap-2">
+          <input
+            autoFocus
+            className="rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-black"
+            placeholder="Название колонки"
+            value={colName}
+            onChange={e => setColName(e.target.value)}
+            required
+          />
+          <button type="submit" className="rounded bg-black px-3 py-2 text-sm text-white hover:bg-gray-800 transition-colors">
+            Добавить
+          </button>
+          <button
+            type="button"
+            onClick={() => { setColName(''); setShowColForm(false) }}
+            className="rounded border px-3 py-2 text-sm hover:bg-gray-50 transition-colors"
+          >
+            Отмена
+          </button>
+        </form>
+      )}
+
+      {/* ── Add deal form ─────────────────────────────────────── */}
+      {showDealForm && (
+        <form onSubmit={addDeal} className="mb-6 space-y-3 rounded-lg border bg-gray-50 p-4 shadow-sm">
+          <input
+            className="w-full rounded border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black"
+            placeholder="Название сделки"
+            value={dealTitle}
+            onChange={e => setDealTitle(e.target.value)}
+            required
+          />
+          <input
+            className="w-full rounded border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black"
+            type="number"
+            placeholder="Сумма"
+            value={dealAmount}
+            onChange={e => setDealAmount(e.target.value)}
+          />
+          <select
+            className="w-full rounded border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black"
+            value={dealContactId}
+            onChange={e => setDealContactId(e.target.value)}
+          >
             <option value="">Без контакта</option>
             {contacts.map(c => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
+          <select
+            className="w-full rounded border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black"
+            value={dealStatusId}
+            onChange={e => setDealStatusId(e.target.value)}
+          >
+            <option value="">Без статуса</option>
+            {sorted.map(s => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
           <div className="flex gap-2">
-            <button type="submit" className="rounded bg-black px-4 py-2 text-white">Добавить</button>
-            <button type="button" onClick={resetForm} className="rounded border px-4 py-2">Отмена</button>
+            <button type="submit" className="rounded bg-black px-4 py-2 text-white hover:bg-gray-800 transition-colors">
+              Добавить
+            </button>
+            <button type="button" onClick={resetDealForm} className="rounded border px-4 py-2 hover:bg-gray-100 transition-colors">
+              Отмена
+            </button>
           </div>
         </form>
       )}
 
+      {/* ── Kanban board ──────────────────────────────────────── */}
       {loading ? (
-        <p>Загрузка...</p>
+        <p className="text-gray-500">Загрузка...</p>
+      ) : sorted.length === 0 ? (
+        <p className="text-gray-500">Нет колонок. Добавьте первую колонку пайплайна.</p>
       ) : (
-        <div className="grid grid-cols-3 gap-4">
-          {STATUSES.map(status => (
-            <div key={status.key} className="rounded border bg-gray-50 p-3">
-              <h2 className="mb-3 font-medium">{status.label}</h2>
-              <div className="space-y-2">
-                {deals.filter(d => d.status === status.key).map(deal => (
-                  <div key={deal.id} className="rounded border bg-white p-3 shadow-sm">
-                    <p className="font-medium">{deal.title}</p>
-                    <p className="text-sm text-gray-500">{contactName(deal.contact_id)}</p>
-                    <p className="text-sm text-gray-700">{deal.amount} сум</p>
-                    <div className="mt-2 flex items-center justify-between">
-                      <div className="space-x-1">
-                        <button onClick={() => moveStatus(deal, -1)} className="text-xs text-gray-500">←</button>
-                        <button onClick={() => moveStatus(deal, 1)} className="text-xs text-gray-500">→</button>
+        <div className="flex gap-4 overflow-x-auto pb-4">
+          {/* Dynamic status columns */}
+          {sorted.map((status, colIdx) => {
+            const colDeals = deals.filter(d => d.status_id === status.id)
+            const isOver = dragOverCol === status.id
+            return (
+              <div
+                key={status.id}
+                className={`w-64 flex-shrink-0 rounded-lg border p-3 transition-colors ${
+                  isOver ? 'border-blue-400 bg-blue-50' : 'bg-gray-50'
+                }`}
+                onDragOver={e => { e.preventDefault(); setDragOverCol(status.id) }}
+                onDragLeave={() => setDragOverCol(null)}
+                onDrop={() => handleDrop(status.id)}
+              >
+                {/* Column header */}
+                <div className="mb-3 flex min-h-[28px] items-center gap-1">
+                  {renamingId === status.id ? (
+                    <form
+                      onSubmit={e => { e.preventDefault(); void renameColumn(status.id) }}
+                      className="flex w-full gap-1"
+                    >
+                      <input
+                        autoFocus
+                        className="flex-1 rounded border px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-black"
+                        value={renameVal}
+                        onChange={e => setRenameVal(e.target.value)}
+                      />
+                      <button type="submit" className="text-xs text-green-600">OK</button>
+                      <button
+                        type="button"
+                        onClick={() => setRenamingId(null)}
+                        className="text-xs text-gray-400"
+                      >
+                        ✕
+                      </button>
+                    </form>
+                  ) : (
+                    <>
+                      <h2
+                        className="flex-1 cursor-pointer font-medium"
+                        onDoubleClick={() => { setRenamingId(status.id); setRenameVal(status.name) }}
+                        title="Двойной клик — переименовать"
+                      >
+                        {status.name}
+                        <span className="ml-1.5 text-xs font-normal text-gray-400">
+                          {colDeals.length}
+                        </span>
+                      </h2>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => void moveColumn(status, -1)}
+                          disabled={colIdx === 0}
+                          className="text-xs text-gray-400 disabled:opacity-30"
+                        >
+                          ←
+                        </button>
+                        <button
+                          onClick={() => void moveColumn(status, 1)}
+                          disabled={colIdx === sorted.length - 1}
+                          className="text-xs text-gray-400 disabled:opacity-30"
+                        >
+                          →
+                        </button>
+                        <button
+                          onClick={() => void deleteColumn(status.id)}
+                          className="text-xs text-red-400 hover:text-red-600"
+                        >
+                          ×
+                        </button>
                       </div>
-                      <button onClick={() => handleDelete(deal.id)} className="text-xs text-red-600">Удал.</button>
-                    </div>
-                  </div>
-                ))}
+                    </>
+                  )}
+                </div>
+
+                {/* Deal cards */}
+                <div className="space-y-2">
+                  {colDeals.map(deal => <DealCard key={deal.id} deal={deal} />)}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
+
+          {/* Unassigned (null status_id) */}
+          {deals.some(d => d.status_id === null) && (() => {
+            const isOver = dragOverCol === NULL_COL
+            const nullDeals = deals.filter(d => d.status_id === null)
+            return (
+              <div
+                className={`w-64 flex-shrink-0 rounded-lg border border-dashed p-3 transition-colors ${
+                  isOver ? 'border-blue-400 bg-blue-50' : 'bg-gray-50'
+                }`}
+                onDragOver={e => { e.preventDefault(); setDragOverCol(NULL_COL) }}
+                onDragLeave={() => setDragOverCol(null)}
+                onDrop={() => handleDrop(NULL_COL)}
+              >
+                <h2 className="mb-3 font-medium text-gray-400">
+                  Без статуса
+                  <span className="ml-1.5 text-xs font-normal">{nullDeals.length}</span>
+                </h2>
+                <div className="space-y-2">
+                  {nullDeals.map(deal => <DealCard key={deal.id} deal={deal} />)}
+                </div>
+              </div>
+            )
+          })()}
         </div>
       )}
     </div>

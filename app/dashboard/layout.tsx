@@ -22,6 +22,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
     <div className="flex min-h-screen bg-gray-100">
       <aside className="w-64 border-r bg-white p-4 shadow-lg flex-shrink-0">
         <nav className="space-y-2">
+          <a href="/dashboard" className="block py-2 px-3 rounded-md text-gray-700 hover:bg-blue-50 hover:text-blue-700">Аналитика</a>
           <a href="/dashboard/contacts" className="block py-2 px-3 rounded-md text-gray-700 hover:bg-blue-50 hover:text-blue-700">Контакты</a>
           <a href="/dashboard/deals" className="block py-2 px-3 rounded-md text-gray-700 hover:bg-blue-50 hover:text-blue-700">Сделки</a>
         </nav>
