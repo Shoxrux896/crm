@@ -33,3 +33,18 @@ export type DealLog = {
   content: string
   created_at: string
 }
+
+export type Task = {
+  id: string
+  user_id: string
+  deal_id: string | null
+  title: string
+  description: string | null
+  due_date: string
+  is_completed: boolean
+  created_at: string
+}
+
+export type TaskWithDeal = Task & {
+  deals: { id: string; title: string } | null
+}

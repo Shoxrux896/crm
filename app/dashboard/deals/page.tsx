@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase'
-import type { Contact, Deal, DealLog, PipelineStatus } from '@/lib/type'
+import type { Contact, Deal, DealLog, PipelineStatus, Task } from '@/lib/type'
 
 const NULL_COL = '__unassigned__'
+
+type ModalTab = 'notes' | 'tasks'
 
 export default function DealsPage() {
   const supabase = createClient()
@@ -34,11 +36,20 @@ export default function DealsPage() {
   const dragging = useRef(false)
   const [dragOverCol, setDragOverCol] = useState<string | null>(null)
 
-  // deal detail modal + logs
+  // deal detail modal
   const [selectedDeal, setSelectedDeal] = useState<Deal | null>(null)
+  const [modalTab, setModalTab] = useState<ModalTab>('notes')
+
+  // notes tab
   const [logs, setLogs] = useState<DealLog[]>([])
   const [logsLoading, setLogsLoading] = useState(false)
   const [newNote, setNewNote] = useState('')
+
+  // tasks tab
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [tasksLoading, setTasksLoading] = useState(false)
+  const [newTaskTitle, setNewTaskTitle] = useState('')
+  const [newTaskDueDate, setNewTaskDueDate] = useState('')
 
   // columns in display order
   const sorted = [...statuses].sort((a, b) => a.position - b.position)
@@ -52,7 +63,27 @@ export default function DealsPage() {
         supabase.from('deals').select('*').order('created_at', { ascending: false }),
         supabase.from('contacts').select('*'),
       ])
-      setStatuses(statusRes.data ?? [])
+
+      let fetchedStatuses: PipelineStatus[] = statusRes.data ?? []
+
+      // First-time user: seed three default pipeline columns automatically
+      if (!statusRes.error && fetchedStatuses.length === 0) {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (user) {
+          const { data: seeded } = await supabase
+            .from('pipeline_statuses')
+            .insert([
+              { name: 'Lead',        position: 0, user_id: user.id },
+              { name: 'In Progress', position: 1, user_id: user.id },
+              { name: 'Closed',      position: 2, user_id: user.id },
+            ])
+            .select()
+            .order('position')
+          fetchedStatuses = seeded ?? []
+        }
+      }
+
+      setStatuses(fetchedStatuses)
       setDeals(dealsRes.data ?? [])
       setContacts(contactsRes.data ?? [])
       setLoading(false)
@@ -74,24 +105,46 @@ export default function DealsPage() {
       hour: '2-digit', minute: '2-digit',
     })
 
-  // ── Deal modal / logs ─────────────────────────────────────────
+  const isOverdue = (iso: string, completed: boolean) =>
+    !completed && new Date(iso) < new Date()
+
+  // ── Deal modal / notes ────────────────────────────────────────
   const openDealModal = async (deal: Deal) => {
     setSelectedDeal(deal)
+    setModalTab('notes')
     setNewNote('')
+    setNewTaskTitle('')
+    setNewTaskDueDate('')
+
     setLogsLoading(true)
-    const { data } = await supabase
-      .from('deal_logs')
-      .select('*')
-      .eq('deal_id', deal.id)
-      .order('created_at', { ascending: true })
-    setLogs(data ?? [])
+    setTasksLoading(true)
+
+    const [logsRes, tasksRes] = await Promise.all([
+      supabase
+        .from('deal_logs')
+        .select('*')
+        .eq('deal_id', deal.id)
+        .order('created_at', { ascending: true }),
+      supabase
+        .from('tasks')
+        .select('*')
+        .eq('deal_id', deal.id)
+        .order('due_date', { ascending: true }),
+    ])
+
+    setLogs(logsRes.data ?? [])
     setLogsLoading(false)
+    setTasks(tasksRes.data ?? [])
+    setTasksLoading(false)
   }
 
   const closeModal = () => {
     setSelectedDeal(null)
     setLogs([])
+    setTasks([])
     setNewNote('')
+    setNewTaskTitle('')
+    setNewTaskDueDate('')
   }
 
   const addLog = async () => {
@@ -112,6 +165,53 @@ export default function DealsPage() {
   const deleteLog = async (logId: string) => {
     setLogs(prev => prev.filter(l => l.id !== logId))
     await supabase.from('deal_logs').delete().eq('id', logId)
+  }
+
+  // ── Tasks CRUD ────────────────────────────────────────────────
+  const addTask = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newTaskTitle.trim() || !newTaskDueDate || !selectedDeal) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        deal_id: selectedDeal.id,
+        user_id: user.id,
+        title: newTaskTitle.trim(),
+        due_date: new Date(newTaskDueDate).toISOString(),
+      })
+      .select()
+      .single()
+    if (!error && data) {
+      setTasks(prev =>
+        [...prev, data as Task].sort(
+          (a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime()
+        )
+      )
+      setNewTaskTitle('')
+      setNewTaskDueDate('')
+    }
+  }
+
+  const toggleTask = async (taskId: string, current: boolean) => {
+    setTasks(prev =>
+      prev.map(t => (t.id === taskId ? { ...t, is_completed: !current } : t))
+    )
+    const { error } = await supabase
+      .from('tasks')
+      .update({ is_completed: !current })
+      .eq('id', taskId)
+    if (error) {
+      setTasks(prev =>
+        prev.map(t => (t.id === taskId ? { ...t, is_completed: current } : t))
+      )
+    }
+  }
+
+  const deleteTask = async (taskId: string) => {
+    setTasks(prev => prev.filter(t => t.id !== taskId))
+    await supabase.from('tasks').delete().eq('id', taskId)
   }
 
   // ── Deal status change (optimistic) ──────────────────────────
@@ -285,7 +385,7 @@ export default function DealsPage() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
           onClick={e => { if (e.target === e.currentTarget) closeModal() }}
         >
-          <div className="relative flex h-[82vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+          <div className="relative flex h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
 
             {/* Modal header */}
             <div className="flex items-start justify-between border-b px-6 py-4">
@@ -310,82 +410,233 @@ export default function DealsPage() {
               </button>
             </div>
 
-            {/* Log list */}
-            <div className="flex-1 overflow-y-auto px-6 py-4">
-              <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
-                История заметок
-              </p>
+            {/* Tab bar */}
+            <div className="flex border-b">
+              <button
+                onClick={() => setModalTab('notes')}
+                className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                  modalTab === 'notes'
+                    ? 'border-b-2 border-black text-black'
+                    : 'text-gray-400 hover:text-gray-700'
+                }`}
+              >
+                Заметки
+                {logs.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-gray-100 px-1.5 py-0.5 text-xs font-normal text-gray-500">
+                    {logs.length}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setModalTab('tasks')}
+                className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                  modalTab === 'tasks'
+                    ? 'border-b-2 border-black text-black'
+                    : 'text-gray-400 hover:text-gray-700'
+                }`}
+              >
+                Задачи
+                {tasks.filter(t => !t.is_completed).length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-normal text-amber-700">
+                    {tasks.filter(t => !t.is_completed).length}
+                  </span>
+                )}
+              </button>
+            </div>
 
-              {logsLoading ? (
-                <p className="text-sm text-gray-400">Загрузка...</p>
-              ) : logs.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-10 text-center">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                    <line x1="16" y1="13" x2="8" y2="13" />
-                    <line x1="16" y1="17" x2="8" y2="17" />
-                    <polyline points="10 9 9 9 8 9" />
-                  </svg>
-                  <p className="text-sm text-gray-400">Заметок пока нет.</p>
-                  <p className="mt-0.5 text-xs text-gray-300">Добавьте первую ниже.</p>
+            {/* ── Notes tab ──────────────────────────────────── */}
+            {modalTab === 'notes' && (
+              <>
+                <div className="flex-1 overflow-y-auto px-6 py-4">
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    История заметок
+                  </p>
+                  {logsLoading ? (
+                    <p className="text-sm text-gray-400">Загрузка...</p>
+                  ) : logs.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-10 text-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="16" y1="13" x2="8" y2="13" />
+                        <line x1="16" y1="17" x2="8" y2="17" />
+                        <polyline points="10 9 9 9 8 9" />
+                      </svg>
+                      <p className="text-sm text-gray-400">Заметок пока нет.</p>
+                      <p className="mt-0.5 text-xs text-gray-300">Добавьте первую ниже.</p>
+                    </div>
+                  ) : (
+                    <ul className="space-y-3">
+                      {logs.map(log => (
+                        <li key={log.id} className="group flex items-start gap-3">
+                          <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-gray-900 text-xs font-bold text-white">
+                            N
+                          </div>
+                          <div className="flex-1 rounded-lg border bg-gray-50 px-3 py-2.5">
+                            <p className="whitespace-pre-wrap text-sm text-gray-800">{log.content}</p>
+                            <p className="mt-1.5 text-xs text-gray-400">{formatDate(log.created_at)}</p>
+                          </div>
+                          <button
+                            onClick={() => void deleteLog(log.id)}
+                            aria-label="Удалить заметку"
+                            className="mt-1 flex-shrink-0 rounded-md p-1 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                              <path d="M10 11v6" /><path d="M14 11v6" />
+                              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                            </svg>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
-              ) : (
-                <ul className="space-y-3">
-                  {logs.map(log => (
-                    <li key={log.id} className="group flex items-start gap-3">
-                      <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-gray-900 text-xs font-bold text-white">
-                        N
-                      </div>
-                      <div className="flex-1 rounded-lg border bg-gray-50 px-3 py-2.5">
-                        <p className="whitespace-pre-wrap text-sm text-gray-800">{log.content}</p>
-                        <p className="mt-1.5 text-xs text-gray-400">{formatDate(log.created_at)}</p>
-                      </div>
-                      <button
-                        onClick={() => void deleteLog(log.id)}
-                        aria-label="Удалить заметку"
-                        className="mt-1 flex-shrink-0 rounded-md p-1 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <polyline points="3 6 5 6 21 6" />
-                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                          <path d="M10 11v6" />
-                          <path d="M14 11v6" />
-                          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                        </svg>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
 
-            {/* Add note footer */}
-            <div className="border-t bg-gray-50 px-6 py-4">
-              <textarea
-                rows={3}
-                placeholder="Напишите заметку или обновление по сделке…"
-                value={newNote}
-                onChange={e => setNewNote(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault()
-                    void addLog()
-                  }
-                }}
-                className="w-full resize-none rounded-lg border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-black"
-              />
-              <div className="mt-2 flex items-center justify-between">
-                <p className="text-xs text-gray-400">Ctrl + Enter — быстрая отправка</p>
-                <button
-                  onClick={() => void addLog()}
-                  disabled={!newNote.trim()}
-                  className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-gray-800 disabled:opacity-40"
-                >
-                  Добавить заметку
-                </button>
-              </div>
-            </div>
+                {/* Notes footer */}
+                <div className="border-t bg-gray-50 px-6 py-4">
+                  <textarea
+                    rows={3}
+                    placeholder="Напишите заметку или обновление по сделке…"
+                    value={newNote}
+                    onChange={e => setNewNote(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault()
+                        void addLog()
+                      }
+                    }}
+                    className="w-full resize-none rounded-lg border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-black"
+                  />
+                  <div className="mt-2 flex items-center justify-between">
+                    <p className="text-xs text-gray-400">Ctrl + Enter — быстрая отправка</p>
+                    <button
+                      onClick={() => void addLog()}
+                      disabled={!newNote.trim()}
+                      className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-gray-800 disabled:opacity-40"
+                    >
+                      Добавить заметку
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* ── Tasks tab ──────────────────────────────────── */}
+            {modalTab === 'tasks' && (
+              <>
+                <div className="flex-1 overflow-y-auto px-6 py-4">
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    Задачи и напоминания
+                  </p>
+                  {tasksLoading ? (
+                    <p className="text-sm text-gray-400">Загрузка...</p>
+                  ) : tasks.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-10 text-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
+                        <path d="M9 11l3 3L22 4" />
+                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                      </svg>
+                      <p className="text-sm text-gray-400">Задач пока нет.</p>
+                      <p className="mt-0.5 text-xs text-gray-300">Добавьте первую ниже.</p>
+                    </div>
+                  ) : (
+                    <ul className="space-y-2">
+                      {tasks.map(task => {
+                        const overdue = isOverdue(task.due_date, task.is_completed)
+                        return (
+                          <li
+                            key={task.id}
+                            className="group flex items-start gap-3 rounded-lg border bg-white p-3 shadow-sm"
+                          >
+                            {/* Checkbox */}
+                            <button
+                              onClick={() => void toggleTask(task.id, task.is_completed)}
+                              aria-label={task.is_completed ? 'Отметить незавершённой' : 'Отметить завершённой'}
+                              className={`mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border-2 transition-colors ${
+                                task.is_completed
+                                  ? 'border-green-500 bg-green-500 text-white'
+                                  : 'border-gray-300 hover:border-gray-500'
+                              }`}
+                            >
+                              {task.is_completed && (
+                                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              )}
+                            </button>
+
+                            {/* Text */}
+                            <div className="min-w-0 flex-1">
+                              <p className={`text-sm font-medium leading-snug ${
+                                task.is_completed
+                                  ? 'text-gray-400 line-through'
+                                  : 'text-gray-800'
+                              }`}>
+                                {task.title}
+                              </p>
+                              <p className={`mt-0.5 text-xs ${
+                                overdue
+                                  ? 'font-medium text-red-500'
+                                  : task.is_completed
+                                    ? 'text-gray-300'
+                                    : 'text-gray-400'
+                              }`}>
+                                {overdue && '⚠ '}
+                                {formatDate(task.due_date)}
+                              </p>
+                            </div>
+
+                            {/* Delete */}
+                            <button
+                              onClick={() => void deleteTask(task.id)}
+                              aria-label="Удалить задачу"
+                              className="flex-shrink-0 rounded-md p-1 text-gray-300 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="3 6 5 6 21 6" />
+                                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                                <path d="M10 11v6" /><path d="M14 11v6" />
+                                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                              </svg>
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                </div>
+
+                {/* Tasks footer */}
+                <div className="border-t bg-gray-50 px-6 py-4">
+                  <form onSubmit={addTask} className="space-y-2">
+                    <input
+                      type="text"
+                      placeholder="Название задачи…"
+                      value={newTaskTitle}
+                      onChange={e => setNewTaskTitle(e.target.value)}
+                      required
+                      className="w-full rounded-lg border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-black"
+                    />
+                    <input
+                      type="datetime-local"
+                      value={newTaskDueDate}
+                      onChange={e => setNewTaskDueDate(e.target.value)}
+                      required
+                      className="w-full rounded-lg border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-black"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!newTaskTitle.trim() || !newTaskDueDate}
+                      className="w-full rounded-lg bg-black py-2 text-sm font-medium text-white transition-opacity hover:bg-gray-800 disabled:opacity-40"
+                    >
+                      + Добавить задачу
+                    </button>
+                  </form>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -396,13 +647,13 @@ export default function DealsPage() {
         <div className="flex gap-2">
           <button
             onClick={() => setShowColForm(true)}
-            className="rounded border px-4 py-2 text-sm hover:bg-gray-50 transition-colors"
+            className="rounded border px-4 py-2 text-sm transition-colors hover:bg-gray-50"
           >
             + Колонка
           </button>
           <button
             onClick={() => setShowDealForm(true)}
-            className="rounded bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 transition-colors"
+            className="rounded bg-black px-4 py-2 text-sm text-white transition-colors hover:bg-gray-800"
           >
             + Сделка
           </button>
@@ -420,13 +671,13 @@ export default function DealsPage() {
             onChange={e => setColName(e.target.value)}
             required
           />
-          <button type="submit" className="rounded bg-black px-3 py-2 text-sm text-white hover:bg-gray-800 transition-colors">
+          <button type="submit" className="rounded bg-black px-3 py-2 text-sm text-white transition-colors hover:bg-gray-800">
             Добавить
           </button>
           <button
             type="button"
             onClick={() => { setColName(''); setShowColForm(false) }}
-            className="rounded border px-3 py-2 text-sm hover:bg-gray-50 transition-colors"
+            className="rounded border px-3 py-2 text-sm transition-colors hover:bg-gray-50"
           >
             Отмена
           </button>
@@ -471,10 +722,10 @@ export default function DealsPage() {
             ))}
           </select>
           <div className="flex gap-2">
-            <button type="submit" className="rounded bg-black px-4 py-2 text-white hover:bg-gray-800 transition-colors">
+            <button type="submit" className="rounded bg-black px-4 py-2 text-white transition-colors hover:bg-gray-800">
               Добавить
             </button>
-            <button type="button" onClick={resetDealForm} className="rounded border px-4 py-2 hover:bg-gray-100 transition-colors">
+            <button type="button" onClick={resetDealForm} className="rounded border px-4 py-2 transition-colors hover:bg-gray-100">
               Отмена
             </button>
           </div>
@@ -485,7 +736,20 @@ export default function DealsPage() {
       {loading ? (
         <p className="text-gray-500">Загрузка...</p>
       ) : sorted.length === 0 ? (
-        <p className="text-gray-500">Нет колонок. Добавьте первую колонку пайплайна.</p>
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-4 text-gray-300">
+            <rect x="3" y="3" width="7" height="18" rx="1" />
+            <rect x="14" y="3" width="7" height="10" rx="1" />
+          </svg>
+          <p className="text-sm font-medium text-gray-500">Не удалось загрузить колонки пайплайна.</p>
+          <p className="mt-1 text-xs text-gray-400">Проверьте подключение к Supabase или добавьте колонку вручную.</p>
+          <button
+            onClick={() => setShowColForm(true)}
+            className="mt-4 rounded-lg bg-black px-4 py-2 text-sm text-white transition-colors hover:bg-gray-800"
+          >
+            + Добавить колонку
+          </button>
+        </div>
       ) : (
         <div className="flex gap-4 overflow-x-auto pb-4">
           {/* Dynamic status columns */}
