@@ -48,3 +48,18 @@ export type Task = {
 export type TaskWithDeal = Task & {
   deals: { id: string; title: string } | null
 }
+
+export type CallLog = {
+  id: string
+  user_id: string
+  deal_id: string
+  direction: 'incoming' | 'outgoing'
+  duration_seconds: number
+  status: 'answered' | 'no_answer' | 'busy' | 'failed'
+  recording_url: string | null
+  created_at: string
+}
+
+export type CallLogWithDeal = CallLog & {
+  deals: { id: string; title: string } | null
+}

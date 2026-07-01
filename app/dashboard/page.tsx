@@ -68,7 +68,7 @@ export default function DashboardPage() {
   const fmt = (n: number) => n.toLocaleString('ru-RU')
 
   return (
-    <div className="max-w-5xl space-y-8">
+    <div className="max-w-5xl space-y-6 md:space-y-8">
       {/* Page header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Аналитика</h1>
@@ -77,7 +77,7 @@ export default function DashboardPage() {
 
       {loading ? (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4 md:gap-4">
             {[1, 2, 3, 4].map(i => (
               <div key={i} className="h-28 animate-pulse rounded-xl border bg-gray-50" />
             ))}
@@ -87,7 +87,7 @@ export default function DashboardPage() {
       ) : (
         <>
           {/* ── KPI cards ─────────────────────────────────────────── */}
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4 md:gap-4">
             <KpiCard
               label="Активный пайплайн"
               value={`${fmt(pipelineValue)} сум`}
@@ -136,7 +136,7 @@ export default function DashboardPage() {
 
           {/* ── Sales conversion funnel ──────────────────────────── */}
           <div className="rounded-xl border bg-white shadow-sm">
-            <div className="flex items-center justify-between border-b px-6 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3 md:px-6 md:py-4">
               <div>
                 <h2 className="font-semibold text-gray-900">Воронка продаж</h2>
                 <p className="mt-0.5 text-xs text-gray-400">
@@ -157,7 +157,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            <div className="px-6 py-5">
+            <div className="px-4 py-4 md:px-6 md:py-5">
               {stageRows.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-10 text-center">
                   <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
@@ -285,8 +285,8 @@ export default function DashboardPage() {
           </div>
 
           {/* ── Pipeline value breakdown ─────────────────────────── */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div className="rounded-xl border bg-white p-5 shadow-sm sm:col-span-2">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="rounded-xl border bg-white p-4 shadow-sm md:col-span-2 md:p-5">
               <h2 className="mb-4 font-semibold text-gray-900">Распределение по этапам</h2>
               {stageRows.length === 0 ? (
                 <p className="py-4 text-sm text-gray-400">Нет данных.</p>
@@ -296,17 +296,17 @@ export default function DashboardPage() {
                     const sharePct =
                       totalValue > 0 ? (row.value / totalValue) * 100 : 0
                     return (
-                      <div key={row.id} className="flex items-center gap-3 text-sm">
-                        <span className="w-24 flex-shrink-0 truncate text-gray-600">
+                      <div key={row.id} className="flex min-w-0 items-center gap-2 text-sm md:gap-3">
+                        <span className="w-20 flex-shrink-0 truncate text-gray-600 md:w-24">
                           {row.name}
                         </span>
-                        <div className="flex-1 overflow-hidden rounded-full bg-gray-100" style={{ height: '8px' }}>
+                        <div className="min-w-0 flex-1 overflow-hidden rounded-full bg-gray-100" style={{ height: '8px' }}>
                           <div
                             className="h-full rounded-full bg-indigo-400"
                             style={{ width: `${sharePct}%` }}
                           />
                         </div>
-                        <span className="w-28 flex-shrink-0 text-right text-xs text-gray-500">
+                        <span className="hidden w-28 flex-shrink-0 text-right text-xs text-gray-500 sm:inline">
                           {fmt(row.value)} сум
                         </span>
                         <span className="w-8 flex-shrink-0 text-right text-xs font-medium text-gray-400">
@@ -319,7 +319,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            <div className="rounded-xl border bg-white p-5 shadow-sm">
+            <div className="rounded-xl border bg-white p-4 shadow-sm md:p-5">
               <h2 className="mb-4 font-semibold text-gray-900">Итого</h2>
               <dl className="space-y-3 text-sm">
                 <div className="flex justify-between">
@@ -352,7 +352,7 @@ export default function DashboardPage() {
 
           {/* ── Recent deals ────────────────────────────────────── */}
           <div className="rounded-xl border bg-white shadow-sm">
-            <div className="border-b px-6 py-4">
+            <div className="border-b px-4 py-3 md:px-6 md:py-4">
               <h2 className="font-semibold text-gray-900">Последние сделки</h2>
             </div>
             {deals.length === 0 ? (
@@ -365,12 +365,12 @@ export default function DashboardPage() {
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
+                <table className="w-full min-w-[420px] text-left text-sm">
                   <thead>
                     <tr className="border-b bg-gray-50 text-xs font-semibold uppercase tracking-wider text-gray-400">
-                      <th className="px-6 py-3">Сделка</th>
+                      <th className="px-4 py-3 md:px-6">Сделка</th>
                       <th className="px-4 py-3">Этап</th>
-                      <th className="px-6 py-3 text-right">Сумма</th>
+                      <th className="px-4 py-3 text-right md:px-6">Сумма</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
@@ -379,8 +379,8 @@ export default function DashboardPage() {
                       const isWon = s?.id === lastStatus?.id
                       return (
                         <tr key={d.id} className="transition-colors hover:bg-gray-50">
-                          <td className="px-6 py-3.5 font-medium text-gray-900">{d.title}</td>
-                          <td className="px-4 py-3.5">
+                          <td className="px-4 py-3 font-medium text-gray-900 md:px-6 md:py-3.5">{d.title}</td>
+                          <td className="px-4 py-3 md:py-3.5">
                             {s ? (
                               <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${
                                 isWon
@@ -393,7 +393,7 @@ export default function DashboardPage() {
                               <span className="text-xs text-gray-400">Без статуса</span>
                             )}
                           </td>
-                          <td className="px-6 py-3.5 text-right font-semibold text-gray-800">
+                          <td className="px-4 py-3 text-right font-semibold text-gray-800 md:px-6 md:py-3.5">
                             {fmt(d.amount)} сум
                           </td>
                         </tr>

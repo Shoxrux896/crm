@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase'
-import type { Contact, Deal, DealLog, PipelineStatus, Task } from '@/lib/type'
+import type { CallLog, Contact, Deal, DealLog, PipelineStatus, Task } from '@/lib/type'
 
 const NULL_COL = '__unassigned__'
 
-type ModalTab = 'notes' | 'tasks'
+type ModalTab = 'notes' | 'tasks' | 'calls'
 
 export default function DealsPage() {
   const supabase = createClient()
@@ -36,6 +36,9 @@ export default function DealsPage() {
   const dragging = useRef(false)
   const [dragOverCol, setDragOverCol] = useState<string | null>(null)
 
+  // mobile kanban tab
+  const [activeMobileTab, setActiveMobileTab] = useState<string | null>(null)
+
   // deal detail modal
   const [selectedDeal, setSelectedDeal] = useState<Deal | null>(null)
   const [modalTab, setModalTab] = useState<ModalTab>('notes')
@@ -50,6 +53,10 @@ export default function DealsPage() {
   const [tasksLoading, setTasksLoading] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDueDate, setNewTaskDueDate] = useState('')
+
+  // calls tab
+  const [callLogs, setCallLogs] = useState<CallLog[]>([])
+  const [callsLoading, setCallsLoading] = useState(false)
 
   // columns in display order
   const sorted = [...statuses].sort((a, b) => a.position - b.position)
@@ -108,6 +115,12 @@ export default function DealsPage() {
   const isOverdue = (iso: string, completed: boolean) =>
     !completed && new Date(iso) < new Date()
 
+  const formatDuration = (seconds: number) => {
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0')
+    const s = (seconds % 60).toString().padStart(2, '0')
+    return `${m}:${s}`
+  }
+
   // ── Deal modal / notes ────────────────────────────────────────
   const openDealModal = async (deal: Deal) => {
     setSelectedDeal(deal)
@@ -118,8 +131,9 @@ export default function DealsPage() {
 
     setLogsLoading(true)
     setTasksLoading(true)
+    setCallsLoading(true)
 
-    const [logsRes, tasksRes] = await Promise.all([
+    const [logsRes, tasksRes, callsRes] = await Promise.all([
       supabase
         .from('deal_logs')
         .select('*')
@@ -130,18 +144,26 @@ export default function DealsPage() {
         .select('*')
         .eq('deal_id', deal.id)
         .order('due_date', { ascending: true }),
+      supabase
+        .from('call_logs')
+        .select('*')
+        .eq('deal_id', deal.id)
+        .order('created_at', { ascending: false }),
     ])
 
     setLogs(logsRes.data ?? [])
     setLogsLoading(false)
     setTasks(tasksRes.data ?? [])
     setTasksLoading(false)
+    setCallLogs(callsRes.data ?? [])
+    setCallsLoading(false)
   }
 
   const closeModal = () => {
     setSelectedDeal(null)
     setLogs([])
     setTasks([])
+    setCallLogs([])
     setNewNote('')
     setNewTaskTitle('')
     setNewTaskDueDate('')
@@ -212,6 +234,39 @@ export default function DealsPage() {
   const deleteTask = async (taskId: string) => {
     setTasks(prev => prev.filter(t => t.id !== taskId))
     await supabase.from('tasks').delete().eq('id', taskId)
+  }
+
+  // ── Calls ─────────────────────────────────────────────────────
+  const simulateCall = async () => {
+    if (!selectedDeal) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+
+    const payload = {
+      deal_id: selectedDeal.id,
+      user_id: user.id,
+      direction: 'outgoing' as const,
+      duration_seconds: 72,
+      status: 'answered' as const,
+      recording_url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
+    }
+
+    // Optimistic insert
+    const optimisticId = crypto.randomUUID()
+    const optimistic: CallLog = { id: optimisticId, ...payload, created_at: new Date().toISOString() }
+    setCallLogs(prev => [optimistic, ...prev])
+
+    const { data, error } = await supabase
+      .from('call_logs')
+      .insert(payload)
+      .select()
+      .single()
+
+    if (!error && data) {
+      setCallLogs(prev => prev.map(c => c.id === optimisticId ? data as CallLog : c))
+    } else {
+      setCallLogs(prev => prev.filter(c => c.id !== optimisticId))
+    }
   }
 
   // ── Deal status change (optimistic) ──────────────────────────
@@ -350,6 +405,47 @@ export default function DealsPage() {
     await supabase.from('deals').delete().eq('id', id)
   }
 
+  // ── Calls tab helpers ─────────────────────────────────────────
+  const CallStatusBadge = ({ status }: { status: string }) => {
+    const map: Record<string, string> = {
+      answered:  'bg-green-100 text-green-700',
+      no_answer: 'bg-red-100 text-red-600',
+      busy:      'bg-amber-100 text-amber-700',
+      failed:    'bg-gray-100 text-gray-500',
+    }
+    const labels: Record<string, string> = {
+      answered:  'Ответил',
+      no_answer: 'Не ответил',
+      busy:      'Занято',
+      failed:    'Ошибка',
+    }
+    const cls = map[status] ?? 'bg-gray-100 text-gray-500'
+    return (
+      <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
+        {labels[status] ?? status}
+      </span>
+    )
+  }
+
+  const DirectionIcon = ({ direction }: { direction: 'incoming' | 'outgoing' }) =>
+    direction === 'incoming' ? (
+      // Arrow pointing down-left — green
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+        className="text-green-500">
+        <line x1="12" y1="5" x2="12" y2="19" />
+        <polyline points="19 12 12 19 5 12" />
+      </svg>
+    ) : (
+      // Arrow pointing up — blue
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+        className="text-blue-500">
+        <line x1="12" y1="19" x2="12" y2="5" />
+        <polyline points="5 12 12 5 19 12" />
+      </svg>
+    )
+
   // ── Shared deal card ──────────────────────────────────────────
   const DealCard = ({ deal }: { deal: Deal }) => (
     <div
@@ -439,6 +535,21 @@ export default function DealsPage() {
                 {tasks.filter(t => !t.is_completed).length > 0 && (
                   <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-normal text-amber-700">
                     {tasks.filter(t => !t.is_completed).length}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setModalTab('calls')}
+                className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                  modalTab === 'calls'
+                    ? 'border-b-2 border-blue-600 text-blue-600'
+                    : 'text-gray-400 hover:text-gray-700'
+                }`}
+              >
+                Звонки
+                {callLogs.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-blue-50 px-1.5 py-0.5 text-xs font-normal text-blue-600">
+                    {callLogs.length}
                   </span>
                 )}
               </button>
@@ -637,6 +748,81 @@ export default function DealsPage() {
                 </div>
               </>
             )}
+
+            {/* ── Calls tab ──────────────────────────────────── */}
+            {modalTab === 'calls' && (
+              <div className="flex flex-1 flex-col overflow-hidden">
+                {/* Calls toolbar */}
+                <div className="flex items-center justify-between border-b px-6 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    История звонков
+                  </p>
+                  <button
+                    onClick={() => void simulateCall()}
+                    className="flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.41 2 2 0 0 1 3.6 1.22h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.91 8.86a16 16 0 0 0 5.55 5.55l.94-.94a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 21 16.92z" />
+                    </svg>
+                    Симуляция звонка
+                  </button>
+                </div>
+
+                {/* Calls list */}
+                <div className="flex-1 overflow-y-auto px-6 py-4">
+                  {callsLoading ? (
+                    <p className="text-sm text-gray-400">Загрузка...</p>
+                  ) : callLogs.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-10 text-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
+                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.41 2 2 0 0 1 3.6 1.22h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.91 8.86a16 16 0 0 0 5.55 5.55l.94-.94a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 21 16.92z" />
+                      </svg>
+                      <p className="text-sm text-gray-400">Звонков пока нет.</p>
+                      <p className="mt-0.5 text-xs text-gray-300">Нажмите «Симуляция звонка» для теста.</p>
+                    </div>
+                  ) : (
+                    <ul className="space-y-3">
+                      {callLogs.map(call => (
+                        <li key={call.id} className="rounded-xl border bg-white p-4 shadow-sm">
+                          {/* Row 1: icon + direction label + badge + duration */}
+                          <div className="flex items-center gap-2">
+                            <div className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full ${
+                              call.direction === 'incoming' ? 'bg-green-50' : 'bg-blue-50'
+                            }`}>
+                              <DirectionIcon direction={call.direction} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-sm font-medium text-gray-800">
+                                  {call.direction === 'incoming' ? 'Входящий' : 'Исходящий'}
+                                </span>
+                                <CallStatusBadge status={call.status} />
+                                <span className="ml-auto font-mono text-sm font-semibold text-gray-700">
+                                  {formatDuration(call.duration_seconds)}
+                                </span>
+                              </div>
+                              <p className="mt-0.5 text-xs text-gray-400">{formatDate(call.created_at)}</p>
+                            </div>
+                          </div>
+
+                          {/* Row 2: audio player */}
+                          {call.recording_url && (
+                            <div className="mt-3">
+                              <audio
+                                controls
+                                src={call.recording_url}
+                                className="h-9 w-full rounded-lg"
+                                preload="none"
+                              />
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -751,113 +937,177 @@ export default function DealsPage() {
           </button>
         </div>
       ) : (
-        <div className="flex gap-4 overflow-x-auto pb-4">
-          {/* Dynamic status columns */}
-          {sorted.map((status, colIdx) => {
-            const colDeals = deals.filter(d => d.status_id === status.id)
-            const isOver = dragOverCol === status.id
+        <>
+          {/* ── Mobile: tabbed column switcher ──────────────────── */}
+          {(() => {
+            const effectiveTab = activeMobileTab ?? sorted[0]?.id ?? null
+            const hasUnassigned = deals.some(d => d.status_id === null)
+            const tabDeals = effectiveTab && effectiveTab !== NULL_COL
+              ? deals.filter(d => d.status_id === effectiveTab)
+              : deals.filter(d => d.status_id === null)
+
             return (
-              <div
-                key={status.id}
-                className={`w-64 flex-shrink-0 rounded-lg border p-3 transition-colors ${
-                  isOver ? 'border-blue-400 bg-blue-50' : 'bg-gray-50'
-                }`}
-                onDragOver={e => { e.preventDefault(); setDragOverCol(status.id) }}
-                onDragLeave={() => setDragOverCol(null)}
-                onDrop={() => handleDrop(status.id)}
-              >
-                {/* Column header */}
-                <div className="mb-3 flex min-h-[28px] items-center gap-1">
-                  {renamingId === status.id ? (
-                    <form
-                      onSubmit={e => { e.preventDefault(); void renameColumn(status.id) }}
-                      className="flex w-full gap-1"
-                    >
-                      <input
-                        autoFocus
-                        className="flex-1 rounded border px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-black"
-                        value={renameVal}
-                        onChange={e => setRenameVal(e.target.value)}
-                      />
-                      <button type="submit" className="text-xs text-green-600">OK</button>
+              <div className="md:hidden">
+                {/* Tab bar */}
+                <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-2">
+                  {sorted.map(status => {
+                    const count = deals.filter(d => d.status_id === status.id).length
+                    const isActive = effectiveTab === status.id
+                    return (
                       <button
-                        type="button"
-                        onClick={() => setRenamingId(null)}
-                        className="text-xs text-gray-400"
-                      >
-                        ✕
-                      </button>
-                    </form>
-                  ) : (
-                    <>
-                      <h2
-                        className="flex-1 cursor-pointer font-medium"
-                        onDoubleClick={() => { setRenamingId(status.id); setRenameVal(status.name) }}
-                        title="Двойной клик — переименовать"
+                        key={status.id}
+                        onClick={() => setActiveMobileTab(status.id)}
+                        className={`flex flex-shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-sm font-medium transition-colors ${
+                          isActive ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
                       >
                         {status.name}
-                        <span className="ml-1.5 text-xs font-normal text-gray-400">
-                          {colDeals.length}
+                        <span className={`rounded-full px-1.5 py-0.5 text-xs font-bold ${
+                          isActive ? 'bg-white/20 text-white' : 'bg-white text-gray-500'
+                        }`}>
+                          {count}
                         </span>
-                      </h2>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => void moveColumn(status, -1)}
-                          disabled={colIdx === 0}
-                          className="text-xs text-gray-400 disabled:opacity-30"
-                        >
-                          ←
-                        </button>
-                        <button
-                          onClick={() => void moveColumn(status, 1)}
-                          disabled={colIdx === sorted.length - 1}
-                          className="text-xs text-gray-400 disabled:opacity-30"
-                        >
-                          →
-                        </button>
-                        <button
-                          onClick={() => void deleteColumn(status.id)}
-                          className="text-xs text-red-400 hover:text-red-600"
-                        >
-                          ×
-                        </button>
-                      </div>
-                    </>
+                      </button>
+                    )
+                  })}
+                  {hasUnassigned && (
+                    <button
+                      onClick={() => setActiveMobileTab(NULL_COL)}
+                      className={`flex flex-shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-sm font-medium transition-colors ${
+                        effectiveTab === NULL_COL ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      }`}
+                    >
+                      Без статуса
+                      <span className={`rounded-full px-1.5 py-0.5 text-xs font-bold ${
+                        effectiveTab === NULL_COL ? 'bg-white/20 text-white' : 'bg-white text-gray-500'
+                      }`}>
+                        {deals.filter(d => d.status_id === null).length}
+                      </span>
+                    </button>
                   )}
                 </div>
 
-                {/* Deal cards */}
-                <div className="space-y-2">
-                  {colDeals.map(deal => <DealCard key={deal.id} deal={deal} />)}
-                </div>
-              </div>
-            )
-          })}
-
-          {/* Unassigned (null status_id) */}
-          {deals.some(d => d.status_id === null) && (() => {
-            const isOver = dragOverCol === NULL_COL
-            const nullDeals = deals.filter(d => d.status_id === null)
-            return (
-              <div
-                className={`w-64 flex-shrink-0 rounded-lg border border-dashed p-3 transition-colors ${
-                  isOver ? 'border-blue-400 bg-blue-50' : 'bg-gray-50'
-                }`}
-                onDragOver={e => { e.preventDefault(); setDragOverCol(NULL_COL) }}
-                onDragLeave={() => setDragOverCol(null)}
-                onDrop={() => handleDrop(NULL_COL)}
-              >
-                <h2 className="mb-3 font-medium text-gray-400">
-                  Без статуса
-                  <span className="ml-1.5 text-xs font-normal">{nullDeals.length}</span>
-                </h2>
-                <div className="space-y-2">
-                  {nullDeals.map(deal => <DealCard key={deal.id} deal={deal} />)}
+                {/* Active column's deals */}
+                <div className="mt-3 space-y-2">
+                  {tabDeals.length === 0 ? (
+                    <p className="py-10 text-center text-sm text-gray-400">Нет сделок в этом этапе</p>
+                  ) : (
+                    tabDeals.map(deal => <DealCard key={deal.id} deal={deal} />)
+                  )}
                 </div>
               </div>
             )
           })()}
-        </div>
+
+          {/* ── Desktop: full horizontal kanban ─────────────────── */}
+          <div className="hidden gap-4 overflow-x-auto pb-4 md:flex">
+            {/* Dynamic status columns */}
+            {sorted.map((status, colIdx) => {
+              const colDeals = deals.filter(d => d.status_id === status.id)
+              const isOver = dragOverCol === status.id
+              return (
+                <div
+                  key={status.id}
+                  className={`w-64 flex-shrink-0 rounded-lg border p-3 transition-colors ${
+                    isOver ? 'border-blue-400 bg-blue-50' : 'bg-gray-50'
+                  }`}
+                  onDragOver={e => { e.preventDefault(); setDragOverCol(status.id) }}
+                  onDragLeave={() => setDragOverCol(null)}
+                  onDrop={() => handleDrop(status.id)}
+                >
+                  {/* Column header */}
+                  <div className="mb-3 flex min-h-[28px] items-center gap-1">
+                    {renamingId === status.id ? (
+                      <form
+                        onSubmit={e => { e.preventDefault(); void renameColumn(status.id) }}
+                        className="flex w-full gap-1"
+                      >
+                        <input
+                          autoFocus
+                          className="flex-1 rounded border px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-black"
+                          value={renameVal}
+                          onChange={e => setRenameVal(e.target.value)}
+                        />
+                        <button type="submit" className="text-xs text-green-600">OK</button>
+                        <button
+                          type="button"
+                          onClick={() => setRenamingId(null)}
+                          className="text-xs text-gray-400"
+                        >
+                          ✕
+                        </button>
+                      </form>
+                    ) : (
+                      <>
+                        <h2
+                          className="flex-1 cursor-pointer font-medium"
+                          onDoubleClick={() => { setRenamingId(status.id); setRenameVal(status.name) }}
+                          title="Двойной клик — переименовать"
+                        >
+                          {status.name}
+                          <span className="ml-1.5 text-xs font-normal text-gray-400">
+                            {colDeals.length}
+                          </span>
+                        </h2>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => void moveColumn(status, -1)}
+                            disabled={colIdx === 0}
+                            className="text-xs text-gray-400 disabled:opacity-30"
+                          >
+                            ←
+                          </button>
+                          <button
+                            onClick={() => void moveColumn(status, 1)}
+                            disabled={colIdx === sorted.length - 1}
+                            className="text-xs text-gray-400 disabled:opacity-30"
+                          >
+                            →
+                          </button>
+                          <button
+                            onClick={() => void deleteColumn(status.id)}
+                            className="text-xs text-red-400 hover:text-red-600"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Deal cards */}
+                  <div className="space-y-2">
+                    {colDeals.map(deal => <DealCard key={deal.id} deal={deal} />)}
+                  </div>
+                </div>
+              )
+            })}
+
+            {/* Unassigned (null status_id) */}
+            {deals.some(d => d.status_id === null) && (() => {
+              const isOver = dragOverCol === NULL_COL
+              const nullDeals = deals.filter(d => d.status_id === null)
+              return (
+                <div
+                  className={`w-64 flex-shrink-0 rounded-lg border border-dashed p-3 transition-colors ${
+                    isOver ? 'border-blue-400 bg-blue-50' : 'bg-gray-50'
+                  }`}
+                  onDragOver={e => { e.preventDefault(); setDragOverCol(NULL_COL) }}
+                  onDragLeave={() => setDragOverCol(null)}
+                  onDrop={() => handleDrop(NULL_COL)}
+                >
+                  <h2 className="mb-3 font-medium text-gray-400">
+                    Без статуса
+                    <span className="ml-1.5 text-xs font-normal">{nullDeals.length}</span>
+                  </h2>
+                  <div className="space-y-2">
+                    {nullDeals.map(deal => <DealCard key={deal.id} deal={deal} />)}
+                  </div>
+                </div>
+              )
+            })()}
+          </div>
+        </>
       )}
     </div>
   )
