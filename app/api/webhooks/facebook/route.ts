@@ -1,4 +1,6 @@
+import crypto from 'crypto'
 import { createClient } from '@supabase/supabase-js'
+import { escapeTelegramHtml, sendTelegramMessage } from '@/lib/telegram'
 
 type MetaLeadChange = {
   field: string
@@ -31,6 +33,27 @@ function getSupabaseAdmin() {
   })
 }
 
+// Meta signs every webhook delivery with the app secret so we can reject forged
+// requests before touching Supabase, the Graph API, or Telegram.
+function isValidMetaSignature(rawBody: string, signatureHeader: string | null): boolean {
+  const appSecret = process.env.META_APP_SECRET
+  if (!appSecret || !signatureHeader?.startsWith('sha256=')) return false
+
+  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex')
+  const expectedBuffer = Buffer.from(expected)
+  const actualBuffer = Buffer.from(signatureHeader)
+  if (expectedBuffer.length !== actualBuffer.length) return false
+
+  return crypto.timingSafeEqual(expectedBuffer, actualBuffer)
+}
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const aBuffer = Buffer.from(a)
+  const bBuffer = Buffer.from(b)
+  if (aBuffer.length !== bBuffer.length) return false
+  return crypto.timingSafeEqual(aBuffer, bBuffer)
+}
+
 async function fetchLeadDetails(leadgenId: string): Promise<MetaLeadDetails> {
   const accessToken = process.env.META_PAGE_ACCESS_TOKEN
   if (!accessToken) {
@@ -54,16 +77,18 @@ async function fetchLeadDetails(leadgenId: string): Promise<MetaLeadDetails> {
   }
 }
 
-async function sendTelegramAlert(text: string) {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN
-  const chatId = process.env.TELEGRAM_ADMIN_CHAT_ID
-  if (!botToken || !chatId) return
+async function notifyTelegram(leadgenId: string, details: MetaLeadDetails) {
+  const name = escapeTelegramHtml(details.fullName ?? 'Не указано')
+  const phone = escapeTelegramHtml(details.phoneNumber ?? 'Не указан')
+  const leadId = escapeTelegramHtml(leadgenId)
 
-  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text }),
-  })
+  const text =
+    `📥 <b>Новый лид из Instagram!</b>\n` +
+    `👤 Имя: ${name}\n` +
+    `📞 Телефон: ${phone}\n` +
+    `🆔 Lead ID: ${leadId}`
+
+  await sendTelegramMessage(text, { parseMode: 'HTML' })
 }
 
 async function processLead(leadgenId: string, formId: string | undefined) {
@@ -90,9 +115,7 @@ async function processLead(leadgenId: string, formId: string | undefined) {
     .eq('lead_id', leadgenId)
   if (updateError) throw updateError
 
-  await sendTelegramAlert(
-    `📥 Получен новый лид из Instagram! ${details.fullName ?? 'Без имени'} - ${details.phoneNumber ?? 'без телефона'}`
-  )
+  await notifyTelegram(leadgenId, details)
 }
 
 export async function GET(request: Request) {
@@ -103,7 +126,7 @@ export async function GET(request: Request) {
 
   const verifyToken = process.env.META_VERIFY_TOKEN
 
-  if (mode === 'subscribe' && verifyToken && token === verifyToken) {
+  if (mode === 'subscribe' && verifyToken && token && timingSafeStringEqual(token, verifyToken)) {
     return new Response(challenge ?? '', { status: 200, headers: { 'Content-Type': 'text/plain' } })
   }
 
@@ -111,9 +134,16 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const rawBody = await request.text()
+
+  if (!isValidMetaSignature(rawBody, request.headers.get('x-hub-signature-256'))) {
+    console.error('Facebook webhook: invalid or missing X-Hub-Signature-256')
+    return new Response('Forbidden', { status: 403 })
+  }
+
   let body: MetaWebhookBody
   try {
-    body = (await request.json()) as MetaWebhookBody
+    body = JSON.parse(rawBody) as MetaWebhookBody
   } catch (err) {
     console.error('Facebook webhook: invalid JSON body', err)
     return Response.json({ success: true })
