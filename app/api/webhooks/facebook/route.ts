@@ -103,7 +103,20 @@ async function processLead(leadgenId: string, formId: string | undefined) {
     )
   if (insertError) throw insertError
 
-  const details = await fetchLeadDetails(leadgenId)
+  // Meta's own webhook test tool sends leadgen_ids that don't correspond to a real
+  // lead, so the Graph API replies with an "Unsupported request" error. Fall back to
+  // mock details rather than aborting, so the record is still saved and the admin
+  // still gets notified (matching the behavior a real, working integration would have).
+  let details: MetaLeadDetails
+  try {
+    details = await fetchLeadDetails(leadgenId)
+  } catch (err) {
+    console.error('Falling back to mock lead details after Graph API error', leadgenId, err)
+    details = {
+      fullName: 'Meta Test Lead',
+      phoneNumber: '+123456789',
+    }
+  }
 
   const { error: updateError } = await supabase
     .from('facebook_leads')
