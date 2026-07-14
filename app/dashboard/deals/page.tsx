@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase'
-import type { CallLog, Contact, Deal, DealLog, PipelineStatus, Task } from '@/lib/type'
+import type { CallLog, Contact, Deal, DealLog, InstagramMessage, PipelineStatus, Task } from '@/lib/type'
 
 const NULL_COL = '__unassigned__'
 
-type ModalTab = 'notes' | 'tasks' | 'calls'
+type ModalTab = 'notes' | 'tasks' | 'calls' | 'instagram'
 
 export default function DealsPage() {
   const supabase = createClient()
@@ -57,6 +57,11 @@ export default function DealsPage() {
   // calls tab
   const [callLogs, setCallLogs] = useState<CallLog[]>([])
   const [callsLoading, setCallsLoading] = useState(false)
+
+  // instagram tab
+  const [instagramMessages, setInstagramMessages] = useState<InstagramMessage[]>([])
+  const [instagramLoading, setInstagramLoading] = useState(false)
+  const [newInstagramMessage, setNewInstagramMessage] = useState('')
 
   // columns in display order
   const sorted = [...statuses].sort((a, b) => a.position - b.position)
@@ -128,12 +133,14 @@ export default function DealsPage() {
     setNewNote('')
     setNewTaskTitle('')
     setNewTaskDueDate('')
+    setNewInstagramMessage('')
 
     setLogsLoading(true)
     setTasksLoading(true)
     setCallsLoading(true)
+    setInstagramLoading(true)
 
-    const [logsRes, tasksRes, callsRes] = await Promise.all([
+    const [logsRes, tasksRes, callsRes, instagramRes] = await Promise.all([
       supabase
         .from('deal_logs')
         .select('*')
@@ -149,6 +156,11 @@ export default function DealsPage() {
         .select('*')
         .eq('deal_id', deal.id)
         .order('created_at', { ascending: false }),
+      supabase
+        .from('instagram_messages')
+        .select('*')
+        .eq('deal_id', deal.id)
+        .order('created_at', { ascending: true }),
     ])
 
     setLogs(logsRes.data ?? [])
@@ -157,6 +169,8 @@ export default function DealsPage() {
     setTasksLoading(false)
     setCallLogs(callsRes.data ?? [])
     setCallsLoading(false)
+    setInstagramMessages(instagramRes.data ?? [])
+    setInstagramLoading(false)
   }
 
   const closeModal = () => {
@@ -164,9 +178,11 @@ export default function DealsPage() {
     setLogs([])
     setTasks([])
     setCallLogs([])
+    setInstagramMessages([])
     setNewNote('')
     setNewTaskTitle('')
     setNewTaskDueDate('')
+    setNewInstagramMessage('')
   }
 
   const addLog = async () => {
@@ -266,6 +282,67 @@ export default function DealsPage() {
       setCallLogs(prev => prev.map(c => c.id === optimisticId ? data as CallLog : c))
     } else {
       setCallLogs(prev => prev.filter(c => c.id !== optimisticId))
+    }
+  }
+
+  // ── Instagram ─────────────────────────────────────────────────
+  const sendInstagramMessage = async () => {
+    if (!newInstagramMessage.trim() || !selectedDeal) return
+    const text = newInstagramMessage.trim()
+    setNewInstagramMessage('')
+
+    const payload = {
+      deal_id: selectedDeal.id,
+      instagram_user_id: 'operator',
+      username: 'operator',
+      message_type: 'direct' as const,
+      text,
+      is_from_customer: false,
+    }
+
+    const optimisticId = crypto.randomUUID()
+    const optimistic: InstagramMessage = { id: optimisticId, ...payload, created_at: new Date().toISOString() }
+    setInstagramMessages(prev => [...prev, optimistic])
+
+    const { data, error } = await supabase
+      .from('instagram_messages')
+      .insert(payload)
+      .select()
+      .single()
+
+    if (!error && data) {
+      setInstagramMessages(prev => prev.map(m => m.id === optimisticId ? data as InstagramMessage : m))
+    } else {
+      setInstagramMessages(prev => prev.filter(m => m.id !== optimisticId))
+    }
+  }
+
+  const simulateCustomerDm = async () => {
+    if (!selectedDeal) return
+
+    const payload = {
+      deal_id: selectedDeal.id,
+      instagram_user_id: 'customer',
+      username: contactName(selectedDeal.contact_id) !== '—' ? contactName(selectedDeal.contact_id) : 'client',
+      message_type: 'direct' as const,
+      text: 'Здравствуйте! Меня заинтересовали ваши услуги, какая цена?',
+      is_from_customer: true,
+    }
+
+    const optimisticId = crypto.randomUUID()
+    const optimistic: InstagramMessage = { id: optimisticId, ...payload, created_at: new Date().toISOString() }
+    setInstagramMessages(prev => [...prev, optimistic])
+
+    const { data, error } = await supabase
+      .from('instagram_messages')
+      .insert(payload)
+      .select()
+      .single()
+
+    if (!error && data) {
+      setInstagramMessages(prev => prev.map(m => m.id === optimisticId ? data as InstagramMessage : m))
+    } else {
+      setInstagramMessages(prev => prev.filter(m => m.id !== optimisticId))
     }
   }
 
@@ -553,6 +630,21 @@ export default function DealsPage() {
                   </span>
                 )}
               </button>
+              <button
+                onClick={() => setModalTab('instagram')}
+                className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                  modalTab === 'instagram'
+                    ? 'border-b-2 border-pink-600 text-pink-600'
+                    : 'text-gray-400 hover:text-gray-700'
+                }`}
+              >
+                Instagram
+                {instagramMessages.length > 0 && (
+                  <span className="ml-1.5 rounded-full bg-pink-50 px-1.5 py-0.5 text-xs font-normal text-pink-600">
+                    {instagramMessages.length}
+                  </span>
+                )}
+              </button>
             </div>
 
             {/* ── Notes tab ──────────────────────────────────── */}
@@ -820,6 +912,92 @@ export default function DealsPage() {
                       ))}
                     </ul>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* ── Instagram tab ──────────────────────────────── */}
+            {modalTab === 'instagram' && (
+              <div className="flex flex-1 flex-col overflow-hidden">
+                {/* Instagram toolbar */}
+                <div className="flex items-center justify-between border-b px-6 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    Instagram переписка
+                  </p>
+                  <button
+                    onClick={() => void simulateCustomerDm()}
+                    className="flex items-center gap-1.5 rounded-lg border border-pink-200 bg-pink-50 px-3 py-1.5 text-xs font-medium text-pink-700 transition-colors hover:bg-pink-100"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                      <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                      <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                    </svg>
+                    Симуляция DM клиента
+                  </button>
+                </div>
+
+                {/* Message feed */}
+                <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
+                  {instagramLoading ? (
+                    <p className="text-sm text-gray-400">Загрузка...</p>
+                  ) : instagramMessages.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-10 text-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
+                        <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                        <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                        <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                      </svg>
+                      <p className="text-sm text-gray-400">Сообщений пока нет.</p>
+                      <p className="mt-0.5 text-xs text-gray-300">Нажмите «Симуляция DM клиента» для теста.</p>
+                    </div>
+                  ) : (
+                    instagramMessages.map(msg => (
+                      <div
+                        key={msg.id}
+                        className={`flex ${msg.is_from_customer ? 'justify-start' : 'justify-end'}`}
+                      >
+                        <div className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 shadow-sm ${
+                          msg.is_from_customer
+                            ? 'rounded-bl-sm bg-slate-100 text-gray-800'
+                            : 'rounded-br-sm bg-indigo-600 text-white'
+                        }`}>
+                          {msg.is_from_customer && (
+                            <p className="mb-0.5 text-xs font-semibold text-pink-600">@{msg.username}</p>
+                          )}
+                          <p className="whitespace-pre-wrap text-sm">{msg.text}</p>
+                          <p className={`mt-1 text-right text-[10px] ${
+                            msg.is_from_customer ? 'text-gray-400' : 'text-indigo-200'
+                          }`}>
+                            {formatDate(msg.created_at)}
+                          </p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Instagram footer */}
+                <div className="border-t bg-gray-50 px-6 py-4">
+                  <form
+                    onSubmit={e => { e.preventDefault(); void sendInstagramMessage() }}
+                    className="flex items-center gap-2"
+                  >
+                    <input
+                      type="text"
+                      placeholder="Ответить в Instagram…"
+                      value={newInstagramMessage}
+                      onChange={e => setNewInstagramMessage(e.target.value)}
+                      className="flex-1 rounded-lg border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!newInstagramMessage.trim()}
+                      className="flex-shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-indigo-700 disabled:opacity-40"
+                    >
+                      Отправить
+                    </button>
+                  </form>
                 </div>
               </div>
             )}

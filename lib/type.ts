@@ -63,3 +63,18 @@ export type CallLog = {
 export type CallLogWithDeal = CallLog & {
   deals: { id: string; title: string } | null
 }
+
+export type InstagramMessage = {
+  id: string
+  deal_id: string
+  instagram_user_id: string
+  username: string
+  message_type: 'direct' | 'comment'
+  text: string
+  is_from_customer: boolean
+  created_at: string
+}
+
+export type InstagramMessageWithDeal = InstagramMessage & {
+  deals: { id: string; title: string } | null
+}
