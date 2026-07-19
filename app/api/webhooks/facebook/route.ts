@@ -19,7 +19,8 @@ type MetaWebhookBody = {
 type MetaLeadDetails = {
   fullName?: string
   phoneNumber?: string
-  instagramUsername?: string
+  email?: string
+  adName?: string
 }
 
 function getSupabaseAdmin() {
@@ -60,20 +61,29 @@ async function fetchLeadDetails(leadgenId: string): Promise<MetaLeadDetails> {
     throw new Error('META_PAGE_ACCESS_TOKEN is not configured')
   }
 
-  const res = await fetch(`https://graph.facebook.com/v19.0/${leadgenId}?access_token=${accessToken}`)
+  // ad_name is a top-level field on the Lead object (not part of field_data,
+  // which only carries the form's own questions/answers), so it must be
+  // requested explicitly.
+  const res = await fetch(
+    `https://graph.facebook.com/v19.0/${leadgenId}?fields=field_data,ad_name&access_token=${accessToken}`
+  )
   if (!res.ok) {
     const details = await res.text()
     throw new Error(`Meta Graph API error: ${details}`)
   }
 
-  const data = (await res.json()) as { field_data?: { name: string; values: string[] }[] }
+  const data = (await res.json()) as {
+    field_data?: { name: string; values: string[] }[]
+    ad_name?: string
+  }
   const fields = data.field_data ?? []
   const getValue = (name: string) => fields.find(f => f.name === name)?.values?.[0]
 
   return {
     fullName: getValue('full_name') ?? getValue('name'),
     phoneNumber: getValue('phone_number'),
-    instagramUsername: getValue('instagram_username') ?? getValue('username'),
+    email: getValue('email'),
+    adName: data.ad_name,
   }
 }
 
@@ -82,26 +92,53 @@ async function notifyTelegram(leadgenId: string, details: MetaLeadDetails) {
   const phone = escapeTelegramHtml(details.phoneNumber ?? 'Не указан')
   const leadId = escapeTelegramHtml(leadgenId)
 
-  const text =
-    `📥 <b>Новый лид из Instagram!</b>\n` +
-    `👤 Имя: ${name}\n` +
-    `📞 Телефон: ${phone}\n` +
-    `🆔 Lead ID: ${leadId}`
+  const lines = [
+    `📥 <b>Новый лид из Instagram!</b>`,
+    `👤 Имя: ${name}`,
+    `📞 Телефон: ${phone}`,
+  ]
 
-  await sendTelegramMessage(text, { parseMode: 'HTML' })
+  // email/ad_name aren't always present on a lead form, so only add a line for
+  // each when the Graph API actually returned one — matches how phone/name
+  // already fall back to a placeholder instead of printing "undefined".
+  if (details.email) {
+    lines.push(`✉️ Email: ${escapeTelegramHtml(details.email)}`)
+  }
+  if (details.adName) {
+    lines.push(`📣 Реклама: ${escapeTelegramHtml(details.adName)}`)
+  }
+
+  lines.push(`🆔 Lead ID: ${leadId}`)
+
+  await sendTelegramMessage(lines.join('\n'), { parseMode: 'HTML' })
 }
 
-async function processLead(leadgenId: string, formId: string | undefined) {
+async function processLead(leadgenId: string) {
   const supabase = getSupabaseAdmin()
 
-  // Upsert so Meta's retried deliveries of the same leadgen_id don't error on the unique constraint
-  const { error: insertError } = await supabase
-    .from('facebook_leads')
+  // Upsert so Meta's retried deliveries of the same leadgen_id don't error on the unique constraint.
+  // ignoreDuplicates leaves an existing row (status/assigned_to/notes/created_at) untouched on
+  // conflict, so a re-delivery can't reset a lead an operator has already started working.
+  //
+  // .select() is what makes this idempotent end-to-end, not just at the row level: with
+  // ignoreDuplicates, Postgres runs INSERT ... ON CONFLICT DO NOTHING, so a conflicting
+  // (duplicate) delivery returns zero rows here — atomically, with no separate
+  // check-then-insert race. We use that to skip the Graph API call and the Telegram
+  // notification entirely for a lead we've already processed, instead of just skipping
+  // the row write and still re-notifying on every retry.
+  const { data: insertedRows, error: insertError } = await supabase
+    .from('leads')
     .upsert(
-      { lead_id: leadgenId, form_id: formId ?? null, created_at: new Date().toISOString() },
-      { onConflict: 'lead_id' }
+      { facebook_lead_id: leadgenId, created_at: new Date().toISOString() },
+      { onConflict: 'facebook_lead_id', ignoreDuplicates: true }
     )
+    .select('id')
   if (insertError) throw insertError
+
+  if (!insertedRows || insertedRows.length === 0) {
+    console.log('Facebook webhook: duplicate delivery for already-processed lead, skipping', leadgenId)
+    return
+  }
 
   // Meta's own webhook test tool sends leadgen_ids that don't correspond to a real
   // lead, so the Graph API replies with an "Unsupported request" error. Fall back to
@@ -119,13 +156,14 @@ async function processLead(leadgenId: string, formId: string | undefined) {
   }
 
   const { error: updateError } = await supabase
-    .from('facebook_leads')
+    .from('leads')
     .update({
       full_name: details.fullName ?? null,
       phone_number: details.phoneNumber ?? null,
-      instagram_username: details.instagramUsername ?? null,
+      email: details.email ?? null,
+      ad_name: details.adName ?? null,
     })
-    .eq('lead_id', leadgenId)
+    .eq('facebook_lead_id', leadgenId)
   if (updateError) throw updateError
 
   await notifyTelegram(leadgenId, details)
@@ -162,22 +200,22 @@ export async function POST(request: Request) {
     return Response.json({ success: true })
   }
 
-  const leads: { leadgenId: string; formId?: string }[] = []
+  const leadgenIds: string[] = []
   for (const entry of body.entry ?? []) {
     for (const change of entry.changes ?? []) {
       if (change.field === 'leadgen' && change.value?.leadgen_id) {
-        leads.push({ leadgenId: change.value.leadgen_id, formId: change.value.form_id })
+        leadgenIds.push(change.value.leadgen_id)
       }
     }
   }
 
   // Always acknowledge Meta quickly with 200 — failures here are logged, not surfaced,
   // so Meta doesn't interpret a downstream error (e.g. Graph API hiccup) as delivery failure and retry forever.
-  for (const lead of leads) {
+  for (const leadgenId of leadgenIds) {
     try {
-      await processLead(lead.leadgenId, lead.formId)
+      await processLead(leadgenId)
     } catch (err) {
-      console.error('Failed to process Facebook lead', lead.leadgenId, err)
+      console.error('Failed to process Facebook lead', leadgenId, err)
     }
   }
 

@@ -6,11 +6,13 @@ const NAV_LINKS = [
   { href: '/dashboard', label: 'Аналитика' },
   { href: '/dashboard/contacts', label: 'Контакты' },
   { href: '/dashboard/deals', label: 'Сделки' },
+  { href: '/dashboard/leads', label: 'Лиды' },
   { href: '/dashboard/tasks', label: 'Задачи' },
 ]
 
-export default function MobileNav() {
+export default function MobileNav({ isAdmin = false }: { isAdmin?: boolean }) {
   const [open, setOpen] = useState(false)
+  const links = isAdmin ? [...NAV_LINKS, { href: '/dashboard/users', label: 'Пользователи' }] : NAV_LINKS
 
   return (
     <>
@@ -60,7 +62,7 @@ export default function MobileNav() {
           </button>
         </div>
         <div className="space-y-1 p-4">
-          {NAV_LINKS.map(link => (
+          {links.map(link => (
             <a
               key={link.href}
               href={link.href}

@@ -1,12 +1,21 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase'
-import type { CallLog, Contact, Deal, DealLog, InstagramMessage, PipelineStatus, Task } from '@/lib/type'
+import type { CallLog, Contact, Deal, DealLog, InstagramMessage, PipelineStatus, Task, TelegramMessage } from '@/lib/type'
 
 const NULL_COL = '__unassigned__'
 
-type ModalTab = 'notes' | 'tasks' | 'calls' | 'instagram'
+type ModalTab = 'notes' | 'tasks' | 'calls' | 'messages'
+
+type UnifiedMessage = {
+  id: string
+  platform: 'instagram' | 'telegram'
+  isFromCustomer: boolean
+  author: string
+  text: string
+  createdAt: string
+}
 
 export default function DealsPage() {
   const supabase = createClient()
@@ -58,10 +67,20 @@ export default function DealsPage() {
   const [callLogs, setCallLogs] = useState<CallLog[]>([])
   const [callsLoading, setCallsLoading] = useState(false)
 
-  // instagram tab
+  // messages tab (Instagram + Telegram)
   const [instagramMessages, setInstagramMessages] = useState<InstagramMessage[]>([])
   const [instagramLoading, setInstagramLoading] = useState(false)
   const [newInstagramMessage, setNewInstagramMessage] = useState('')
+
+  const [telegramMessages, setTelegramMessages] = useState<TelegramMessage[]>([])
+  const [telegramLoading, setTelegramLoading] = useState(false)
+
+  // linking an unlinked Telegram chat to the open deal
+  const [showLinkTelegram, setShowLinkTelegram] = useState(false)
+  const [unlinkedChats, setUnlinkedChats] = useState<TelegramMessage[]>([])
+  const [unlinkedLoading, setUnlinkedLoading] = useState(false)
+  const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
+  const [linkingChat, setLinkingChat] = useState(false)
 
   // columns in display order
   const sorted = [...statuses].sort((a, b) => a.position - b.position)
@@ -134,13 +153,17 @@ export default function DealsPage() {
     setNewTaskTitle('')
     setNewTaskDueDate('')
     setNewInstagramMessage('')
+    setShowLinkTelegram(false)
+    setUnlinkedChats([])
+    setSelectedChatId(null)
 
     setLogsLoading(true)
     setTasksLoading(true)
     setCallsLoading(true)
     setInstagramLoading(true)
+    setTelegramLoading(true)
 
-    const [logsRes, tasksRes, callsRes, instagramRes] = await Promise.all([
+    const [logsRes, tasksRes, callsRes, instagramRes, telegramRes] = await Promise.all([
       supabase
         .from('deal_logs')
         .select('*')
@@ -161,6 +184,11 @@ export default function DealsPage() {
         .select('*')
         .eq('deal_id', deal.id)
         .order('created_at', { ascending: true }),
+      supabase
+        .from('telegram_messages')
+        .select('*')
+        .eq('deal_id', deal.id)
+        .order('created_at', { ascending: true }),
     ])
 
     setLogs(logsRes.data ?? [])
@@ -171,6 +199,8 @@ export default function DealsPage() {
     setCallsLoading(false)
     setInstagramMessages(instagramRes.data ?? [])
     setInstagramLoading(false)
+    setTelegramMessages(telegramRes.data ?? [])
+    setTelegramLoading(false)
   }
 
   const closeModal = () => {
@@ -179,10 +209,14 @@ export default function DealsPage() {
     setTasks([])
     setCallLogs([])
     setInstagramMessages([])
+    setTelegramMessages([])
     setNewNote('')
     setNewTaskTitle('')
     setNewTaskDueDate('')
     setNewInstagramMessage('')
+    setShowLinkTelegram(false)
+    setUnlinkedChats([])
+    setSelectedChatId(null)
   }
 
   const addLog = async () => {
@@ -344,6 +378,73 @@ export default function DealsPage() {
     } else {
       setInstagramMessages(prev => prev.filter(m => m.id !== optimisticId))
     }
+  }
+
+  // ── Telegram (read-only, linked to the deal manually) ──────────
+  const unifiedMessages: UnifiedMessage[] = useMemo(() => {
+    const fromInstagram: UnifiedMessage[] = instagramMessages.map(m => ({
+      id: `ig-${m.id}`,
+      platform: 'instagram',
+      isFromCustomer: m.is_from_customer,
+      author: m.username,
+      text: m.text,
+      createdAt: m.created_at,
+    }))
+    const fromTelegram: UnifiedMessage[] = telegramMessages.map(m => ({
+      id: `tg-${m.id}`,
+      platform: 'telegram',
+      isFromCustomer: true, // the webhook only stores messages Telegram users sent in
+      author: m.sender_username ? `@${m.sender_username}` : (m.sender_name ?? 'Telegram'),
+      text: m.message_text ?? '(без текста)',
+      createdAt: m.created_at,
+    }))
+    return [...fromInstagram, ...fromTelegram].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    )
+  }, [instagramMessages, telegramMessages])
+
+  const openLinkTelegramPanel = async () => {
+    setShowLinkTelegram(true)
+    setSelectedChatId(null)
+    setUnlinkedLoading(true)
+    const { data } = await supabase
+      .from('telegram_messages')
+      .select('*')
+      .is('deal_id', null)
+      .order('created_at', { ascending: false })
+      .limit(100)
+
+    // Dedupe to the most recent message per chat so the picker lists senders, not messages
+    const seen = new Set<number>()
+    const distinct: TelegramMessage[] = []
+    for (const m of data ?? []) {
+      if (seen.has(m.chat_id)) continue
+      seen.add(m.chat_id)
+      distinct.push(m)
+    }
+    setUnlinkedChats(distinct.slice(0, 30))
+    setUnlinkedLoading(false)
+  }
+
+  const linkTelegramChat = async () => {
+    if (selectedChatId === null || !selectedDeal) return
+    setLinkingChat(true)
+    const { error } = await supabase
+      .from('telegram_messages')
+      .update({ deal_id: selectedDeal.id })
+      .eq('chat_id', selectedChatId)
+
+    if (!error) {
+      const { data } = await supabase
+        .from('telegram_messages')
+        .select('*')
+        .eq('deal_id', selectedDeal.id)
+        .order('created_at', { ascending: true })
+      setTelegramMessages(data ?? [])
+      setShowLinkTelegram(false)
+      setSelectedChatId(null)
+    }
+    setLinkingChat(false)
   }
 
   // ── Deal status change (optimistic) ──────────────────────────
@@ -631,17 +732,17 @@ export default function DealsPage() {
                 )}
               </button>
               <button
-                onClick={() => setModalTab('instagram')}
+                onClick={() => setModalTab('messages')}
                 className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
-                  modalTab === 'instagram'
+                  modalTab === 'messages'
                     ? 'border-b-2 border-pink-600 text-pink-600'
                     : 'text-gray-400 hover:text-gray-700'
                 }`}
               >
-                Instagram
-                {instagramMessages.length > 0 && (
+                Сообщения
+                {instagramMessages.length + telegramMessages.length > 0 && (
                   <span className="ml-1.5 rounded-full bg-pink-50 px-1.5 py-0.5 text-xs font-normal text-pink-600">
-                    {instagramMessages.length}
+                    {instagramMessages.length + telegramMessages.length}
                   </span>
                 )}
               </button>
@@ -916,32 +1017,78 @@ export default function DealsPage() {
               </div>
             )}
 
-            {/* ── Instagram tab ──────────────────────────────── */}
-            {modalTab === 'instagram' && (
+            {/* ── Messages tab (Instagram + Telegram) ──────────── */}
+            {modalTab === 'messages' && (
               <div className="flex flex-1 flex-col overflow-hidden">
-                {/* Instagram toolbar */}
+                {/* Toolbar */}
                 <div className="flex items-center justify-between border-b px-6 py-3">
                   <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
-                    Instagram переписка
+                    Переписка
                   </p>
-                  <button
-                    onClick={() => void simulateCustomerDm()}
-                    className="flex items-center gap-1.5 rounded-lg border border-pink-200 bg-pink-50 px-3 py-1.5 text-xs font-medium text-pink-700 transition-colors hover:bg-pink-100"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
-                      <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
-                      <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
-                    </svg>
-                    Симуляция DM клиента
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => (showLinkTelegram ? setShowLinkTelegram(false) : void openLinkTelegramPanel())}
+                      className="flex items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-100"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13" />
+                        <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                      </svg>
+                      Привязать Telegram-чат
+                    </button>
+                    <button
+                      onClick={() => void simulateCustomerDm()}
+                      className="flex items-center gap-1.5 rounded-lg border border-pink-200 bg-pink-50 px-3 py-1.5 text-xs font-medium text-pink-700 transition-colors hover:bg-pink-100"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                        <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                        <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                      </svg>
+                      Симуляция DM клиента
+                    </button>
+                  </div>
                 </div>
+
+                {/* Link-a-chat panel */}
+                {showLinkTelegram && (
+                  <div className="space-y-2 border-b bg-sky-50/60 px-6 py-3">
+                    {unlinkedLoading ? (
+                      <p className="text-xs text-gray-400">Загрузка чатов...</p>
+                    ) : unlinkedChats.length === 0 ? (
+                      <p className="text-xs text-gray-400">Нет непривязанных Telegram-чатов.</p>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={selectedChatId ?? ''}
+                          onChange={e => setSelectedChatId(e.target.value ? Number(e.target.value) : null)}
+                          className="flex-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-900 focus:border-black focus:outline-none"
+                        >
+                          <option value="">Выберите чат...</option>
+                          {unlinkedChats.map(c => (
+                            <option key={c.chat_id} value={c.chat_id}>
+                              {c.sender_username ? `@${c.sender_username}` : (c.sender_name ?? 'Без имени')}
+                              {c.message_text ? ` — ${c.message_text.slice(0, 30)}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => void linkTelegramChat()}
+                          disabled={selectedChatId === null || linkingChat}
+                          className="flex-shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:bg-sky-700 disabled:opacity-40"
+                        >
+                          {linkingChat ? 'Привязка...' : 'Привязать'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Message feed */}
                 <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
-                  {instagramLoading ? (
+                  {instagramLoading || telegramLoading ? (
                     <p className="text-sm text-gray-400">Загрузка...</p>
-                  ) : instagramMessages.length === 0 ? (
+                  ) : unifiedMessages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-10 text-center">
                       <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 text-gray-300">
                         <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
@@ -949,27 +1096,43 @@ export default function DealsPage() {
                         <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
                       </svg>
                       <p className="text-sm text-gray-400">Сообщений пока нет.</p>
-                      <p className="mt-0.5 text-xs text-gray-300">Нажмите «Симуляция DM клиента» для теста.</p>
+                      <p className="mt-0.5 text-xs text-gray-300">Нажмите «Симуляция DM клиента» для теста или привяжите Telegram-чат.</p>
                     </div>
                   ) : (
-                    instagramMessages.map(msg => (
+                    unifiedMessages.map(msg => (
                       <div
                         key={msg.id}
-                        className={`flex ${msg.is_from_customer ? 'justify-start' : 'justify-end'}`}
+                        className={`flex ${msg.isFromCustomer ? 'justify-start' : 'justify-end'}`}
                       >
                         <div className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 shadow-sm ${
-                          msg.is_from_customer
+                          msg.isFromCustomer
                             ? 'rounded-bl-sm bg-slate-100 text-gray-800'
                             : 'rounded-br-sm bg-indigo-600 text-white'
                         }`}>
-                          {msg.is_from_customer && (
-                            <p className="mb-0.5 text-xs font-semibold text-pink-600">@{msg.username}</p>
+                          {msg.isFromCustomer && (
+                            <p className={`mb-0.5 flex items-center gap-1 text-xs font-semibold ${
+                              msg.platform === 'telegram' ? 'text-sky-600' : 'text-pink-600'
+                            }`}>
+                              {msg.platform === 'telegram' ? (
+                                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                  <line x1="22" y1="2" x2="11" y2="13" />
+                                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                                </svg>
+                              ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                  <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+                                  <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+                                  <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+                                </svg>
+                              )}
+                              {msg.author}
+                            </p>
                           )}
                           <p className="whitespace-pre-wrap text-sm">{msg.text}</p>
                           <p className={`mt-1 text-right text-[10px] ${
-                            msg.is_from_customer ? 'text-gray-400' : 'text-indigo-200'
+                            msg.isFromCustomer ? 'text-gray-400' : 'text-indigo-200'
                           }`}>
-                            {formatDate(msg.created_at)}
+                            {formatDate(msg.createdAt)}
                           </p>
                         </div>
                       </div>
@@ -977,7 +1140,7 @@ export default function DealsPage() {
                   )}
                 </div>
 
-                {/* Instagram footer */}
+                {/* Reply footer — Instagram only; Telegram is read-only here */}
                 <div className="border-t bg-gray-50 px-6 py-4">
                   <form
                     onSubmit={e => { e.preventDefault(); void sendInstagramMessage() }}
@@ -998,6 +1161,9 @@ export default function DealsPage() {
                       Отправить
                     </button>
                   </form>
+                  <p className="mt-1.5 text-[11px] text-gray-400">
+                    Ответы отправляются через Instagram. Чтобы ответить в Telegram, используйте бота напрямую.
+                  </p>
                 </div>
               </div>
             )}

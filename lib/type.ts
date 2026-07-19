@@ -78,3 +78,39 @@ export type InstagramMessage = {
 export type InstagramMessageWithDeal = InstagramMessage & {
   deals: { id: string; title: string } | null
 }
+
+export type UserRole = 'admin' | 'operator'
+
+export type Profile = {
+  id: string
+  full_name: string | null
+  role: UserRole
+}
+
+export type LeadStatus = 'new' | 'in_progress' | 'no_answer' | 'converted' | 'rejected'
+
+export type Lead = {
+  id: string
+  facebook_lead_id: string | null
+  full_name: string | null
+  phone_number: string | null
+  email: string | null
+  ad_name: string | null
+  created_at: string
+  status: LeadStatus
+  assigned_to: string | null
+  notes: string | null
+}
+
+export type TelegramMessage = {
+  id: string
+  update_id: number
+  chat_id: number
+  telegram_message_id: number | null
+  sender_name: string | null
+  sender_username: string | null
+  message_text: string | null
+  platform: 'telegram'
+  deal_id: string | null
+  created_at: string
+}
