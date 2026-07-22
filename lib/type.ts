@@ -81,10 +81,16 @@ export type InstagramMessageWithDeal = InstagramMessage & {
 
 export type UserRole = 'admin' | 'operator'
 
+// Optional fields aren't selected by every query (e.g. leads/page.tsx only
+// fetches id/full_name/role for the assignee roster) — mark them optional
+// rather than claiming a guarantee the query didn't ask for.
 export type Profile = {
   id: string
   full_name: string | null
   role: UserRole
+  email?: string | null
+  created_at?: string
+  updated_at?: string
 }
 
 export type LeadStatus = 'new' | 'in_progress' | 'no_answer' | 'converted' | 'rejected'
@@ -100,6 +106,15 @@ export type Lead = {
   status: LeadStatus
   assigned_to: string | null
   notes: string | null
+}
+
+export type OperatorSession = {
+  id: string
+  operator_id: string
+  login_time: string
+  logout_time: string | null
+  total_working_minutes: number
+  total_idle_minutes: number
 }
 
 export type TelegramMessage = {

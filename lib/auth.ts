@@ -1,6 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
-import type { Profile } from './type'
+import { redirect } from 'next/navigation'
+import type { Profile, UserRole } from './type'
 
 export async function getServerSupabase() {
   const cookieStore = await cookies()
@@ -39,4 +40,16 @@ export async function getCurrentUserAndProfile() {
     .single()
 
   return { supabase, user, profile: profile as Profile | null }
+}
+
+// Gate a Server Component/Page behind a role: redirects to /login if signed
+// out, /dashboard if signed in but the wrong role. Existing pages
+// (dashboard/layout.tsx, dashboard/users/page.tsx) predate this and check
+// profile?.role inline — both patterns are fine, use this one for new pages
+// to avoid repeating the two redirect branches.
+export async function requireRole(role: UserRole) {
+  const { user, profile } = await getCurrentUserAndProfile()
+  if (!user) redirect('/login')
+  if (profile?.role !== role) redirect('/dashboard')
+  return { user, profile }
 }

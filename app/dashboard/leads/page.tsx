@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase'
 import type { Lead, LeadStatus, Profile } from '@/lib/type'
+import Spinner from '../components/Spinner'
+import { useToast } from '../components/Toast'
 
 const STATUS_LABELS: Record<LeadStatus, string> = {
   new: 'Новый',
@@ -24,6 +26,7 @@ const STATUS_ORDER: LeadStatus[] = ['new', 'in_progress', 'no_answer', 'converte
 
 export default function LeadsPage() {
   const supabase = createClient()
+  const toast = useToast()
   const [leads, setLeads] = useState<Lead[]>([])
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
@@ -33,7 +36,6 @@ export default function LeadsPage() {
   const [modalStatus, setModalStatus] = useState<LeadStatus>('new')
   const [modalNotes, setModalNotes] = useState('')
   const [saving, setSaving] = useState(false)
-  const [saveError, setSaveError] = useState('')
 
   const loadLeads = async () => {
     setLoading(true)
@@ -69,30 +71,28 @@ export default function LeadsPage() {
     setSelectedLead(lead)
     setModalStatus(lead.status)
     setModalNotes(lead.notes ?? '')
-    setSaveError('')
   }
 
   const closeModal = () => {
     setSelectedLead(null)
-    setSaveError('')
   }
 
   const saveLead = async () => {
     if (!selectedLead) return
     setSaving(true)
-    setSaveError('')
     const { error } = await supabase
       .from('leads')
       .update({ status: modalStatus, notes: modalNotes.trim() || null })
       .eq('id', selectedLead.id)
     setSaving(false)
     if (error) {
-      setSaveError('Не удалось сохранить изменения')
+      toast.error('Не удалось сохранить изменения')
       return
     }
     setLeads(prev =>
       prev.map(l => (l.id === selectedLead.id ? { ...l, status: modalStatus, notes: modalNotes.trim() || null } : l))
     )
+    toast.success('Изменения сохранены')
     closeModal()
   }
 
@@ -239,7 +239,6 @@ export default function LeadsPage() {
                 />
               </div>
 
-              {saveError && <p className="text-sm text-red-500">{saveError}</p>}
             </div>
 
             {/* Footer */}
@@ -253,8 +252,9 @@ export default function LeadsPage() {
               <button
                 onClick={saveLead}
                 disabled={saving}
-                className="rounded-md bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800 disabled:opacity-50"
+                className="flex items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-800 disabled:opacity-50"
               >
+                {saving && <Spinner className="h-4 w-4 text-white" />}
                 {saving ? 'Сохранение...' : 'Сохранить'}
               </button>
             </div>

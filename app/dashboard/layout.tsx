@@ -1,18 +1,23 @@
 import { redirect } from 'next/navigation'
 import MobileNav from './components/MobileNav'
 import IdleTimer from './components/IdleTimer'
+import SessionTracker from './components/SessionTracker'
+import RoleBadge from './components/RoleBadge'
+import ToastProvider from './components/Toast'
 import { getCurrentUserAndProfile } from '@/lib/auth'
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { user, profile } = await getCurrentUserAndProfile()
   if (!user) redirect('/login')
   const isAdmin = profile?.role === 'admin'
+  const displayName = profile?.full_name || user.email || 'Пользователь'
 
   return (
-    <>
+    <ToastProvider>
       <IdleTimer />
+      <SessionTracker />
       {/* Mobile sticky header + slide-out drawer (client component, hidden on md+) */}
-      <MobileNav isAdmin={isAdmin} />
+      <MobileNav isAdmin={isAdmin} userName={displayName} role={profile?.role} />
 
       <div className="flex min-h-screen bg-gray-100">
         {/* Desktop sidebar — hidden on mobile */}
@@ -43,9 +48,15 @@ export default async function DashboardLayout({ children }: { children: React.Re
           </nav>
         </aside>
 
-        {/* Page content — min-w-0 prevents flex overflow on mobile */}
-        <main className="min-w-0 flex-1 bg-white p-4 shadow-lg md:p-6">{children}</main>
+        {/* Content column: desktop topbar (identity + role badge) + page content */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="hidden flex-shrink-0 items-center justify-end gap-3 border-b bg-white px-6 py-3 md:flex">
+            <span className="text-sm font-medium text-gray-700">{displayName}</span>
+            <RoleBadge role={profile?.role} />
+          </header>
+          <main className="min-w-0 flex-1 bg-white p-4 shadow-lg md:p-6">{children}</main>
+        </div>
       </div>
-    </>
+    </ToastProvider>
   )
 }

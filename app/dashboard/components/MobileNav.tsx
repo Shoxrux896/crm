@@ -1,6 +1,8 @@
 'use client'
 
 import { useState } from 'react'
+import type { UserRole } from '@/lib/type'
+import RoleBadge from './RoleBadge'
 
 const NAV_LINKS = [
   { href: '/dashboard', label: 'Аналитика' },
@@ -10,7 +12,15 @@ const NAV_LINKS = [
   { href: '/dashboard/tasks', label: 'Задачи' },
 ]
 
-export default function MobileNav({ isAdmin = false }: { isAdmin?: boolean }) {
+export default function MobileNav({
+  isAdmin = false,
+  userName,
+  role,
+}: {
+  isAdmin?: boolean
+  userName?: string
+  role?: UserRole | null
+}) {
   const [open, setOpen] = useState(false)
   const links = isAdmin ? [...NAV_LINKS, { href: '/dashboard/users', label: 'Пользователи' }] : NAV_LINKS
 
@@ -19,17 +29,20 @@ export default function MobileNav({ isAdmin = false }: { isAdmin?: boolean }) {
       {/* Sticky top header — mobile only */}
       <header className="sticky top-0 z-30 flex items-center justify-between border-b bg-white px-4 py-3 shadow-sm md:hidden">
         <span className="text-base font-semibold text-gray-900">CRM</span>
-        <button
-          onClick={() => setOpen(true)}
-          aria-label="Открыть меню"
-          className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="3" y1="6" x2="21" y2="6" />
-            <line x1="3" y1="12" x2="21" y2="12" />
-            <line x1="3" y1="18" x2="21" y2="18" />
-          </svg>
-        </button>
+        <div className="flex items-center gap-2">
+          <RoleBadge role={role} />
+          <button
+            onClick={() => setOpen(true)}
+            aria-label="Открыть меню"
+            className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       {/* Backdrop */}
@@ -61,6 +74,12 @@ export default function MobileNav({ isAdmin = false }: { isAdmin?: boolean }) {
             </svg>
           </button>
         </div>
+        {userName && (
+          <div className="flex items-center justify-between gap-2 border-b bg-gray-50 px-4 py-3">
+            <span className="truncate text-sm font-medium text-gray-700">{userName}</span>
+            <RoleBadge role={role} />
+          </div>
+        )}
         <div className="space-y-1 p-4">
           {links.map(link => (
             <a

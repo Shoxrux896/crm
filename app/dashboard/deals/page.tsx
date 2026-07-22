@@ -85,6 +85,15 @@ export default function DealsPage() {
   // columns in display order
   const sorted = [...statuses].sort((a, b) => a.position - b.position)
 
+  // A deal's status_id can point at another operator's pipeline column
+  // (pipeline_statuses stays per-operator on purpose — see the admin
+  // visibility migration). Those deals must not just disappear from the
+  // board, so anything that doesn't match one of the viewer's own columns
+  // is grouped into "Без статуса" alongside deals with a null status_id.
+  const knownStatusIds = new Set(statuses.map(s => s.id))
+  const isUnassignedForDisplay = (deal: Deal) =>
+    deal.status_id === null || !knownStatusIds.has(deal.status_id)
+
   // ── Initial load ──────────────────────────────────────────────
   useEffect(() => {
     async function init() {
@@ -1285,10 +1294,10 @@ export default function DealsPage() {
           {/* ── Mobile: tabbed column switcher ──────────────────── */}
           {(() => {
             const effectiveTab = activeMobileTab ?? sorted[0]?.id ?? null
-            const hasUnassigned = deals.some(d => d.status_id === null)
+            const hasUnassigned = deals.some(isUnassignedForDisplay)
             const tabDeals = effectiveTab && effectiveTab !== NULL_COL
               ? deals.filter(d => d.status_id === effectiveTab)
-              : deals.filter(d => d.status_id === null)
+              : deals.filter(isUnassignedForDisplay)
 
             return (
               <div className="md:hidden">
@@ -1325,7 +1334,7 @@ export default function DealsPage() {
                       <span className={`rounded-full px-1.5 py-0.5 text-xs font-bold ${
                         effectiveTab === NULL_COL ? 'bg-white/20 text-white' : 'bg-white text-gray-500'
                       }`}>
-                        {deals.filter(d => d.status_id === null).length}
+                        {deals.filter(isUnassignedForDisplay).length}
                       </span>
                     </button>
                   )}
@@ -1427,10 +1436,10 @@ export default function DealsPage() {
               )
             })}
 
-            {/* Unassigned (null status_id) */}
-            {deals.some(d => d.status_id === null) && (() => {
+            {/* Unassigned (null status_id, or a status_id from another operator's board) */}
+            {deals.some(isUnassignedForDisplay) && (() => {
               const isOver = dragOverCol === NULL_COL
-              const nullDeals = deals.filter(d => d.status_id === null)
+              const nullDeals = deals.filter(isUnassignedForDisplay)
               return (
                 <div
                   className={`w-64 flex-shrink-0 rounded-lg border border-dashed p-3 transition-colors ${
