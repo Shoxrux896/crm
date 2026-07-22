@@ -312,7 +312,7 @@ export default function DealsPage() {
 
     // Optimistic insert
     const optimisticId = crypto.randomUUID()
-    const optimistic: CallLog = { id: optimisticId, ...payload, created_at: new Date().toISOString() }
+    const optimistic: CallLog = { id: optimisticId, ...payload, lead_id: null, created_at: new Date().toISOString() }
     setCallLogs(prev => [optimistic, ...prev])
 
     const { data, error } = await supabase

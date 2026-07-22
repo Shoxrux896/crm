@@ -23,6 +23,7 @@ export type Deal = {
   title: string
   amount: number
   status_id: string | null
+  lead_id: string | null
   created_at: string
 }
 
@@ -52,7 +53,8 @@ export type TaskWithDeal = Task & {
 export type CallLog = {
   id: string
   user_id: string
-  deal_id: string
+  deal_id: string | null
+  lead_id: string | null
   direction: 'incoming' | 'outgoing'
   duration_seconds: number
   status: 'answered' | 'no_answer' | 'busy' | 'failed'
@@ -105,6 +107,7 @@ export type Lead = {
   created_at: string
   status: LeadStatus
   assigned_to: string | null
+  assigned_at: string | null
   notes: string | null
 }
 

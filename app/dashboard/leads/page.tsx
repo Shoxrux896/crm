@@ -24,6 +24,54 @@ const STATUS_BADGE: Record<LeadStatus, string> = {
 
 const STATUS_ORDER: LeadStatus[] = ['new', 'in_progress', 'no_answer', 'converted', 'rejected']
 
+// Matches LEAD_REASSIGN_TIMEOUT_MINUTES default in
+// app/api/cron/reassign-stale-leads — a lead still 'new' this long after
+// being assigned gets flagged in the UI, mirroring the Telegram alert.
+const STALE_TIMEOUT_MINUTES = 15
+
+const isStaleLead = (lead: Lead) =>
+  lead.status === 'new' &&
+  !!lead.assigned_to &&
+  !!lead.assigned_at &&
+  Date.now() - new Date(lead.assigned_at).getTime() > STALE_TIMEOUT_MINUTES * 60_000
+
+const isoMinutesFromNow = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString()
+
+type CallOutcome = 'no_answer' | 'callback' | 'qualified' | 'not_interested'
+
+const OUTCOME_CONFIG: Record<CallOutcome, { label: string; status: LeadStatus; className: string }> = {
+  no_answer: {
+    label: 'Нет ответа',
+    status: 'no_answer',
+    className: 'border-gray-300 bg-gray-50 text-gray-700 hover:bg-gray-100',
+  },
+  callback: {
+    label: 'Перезвонить позже',
+    status: 'in_progress',
+    className: 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100',
+  },
+  qualified: {
+    label: 'Квалифицирован → сделка',
+    status: 'converted',
+    className: 'border-green-200 bg-green-50 text-green-700 hover:bg-green-100',
+  },
+  not_interested: {
+    label: 'Не заинтересован',
+    status: 'rejected',
+    className: 'border-red-200 bg-red-50 text-red-600 hover:bg-red-100',
+  },
+}
+
+const CALL_SCRIPT = {
+  intro: 'Здравствуйте! Меня зовут {ваше имя}, звоню из компании по поводу вашей заявки на {ad_name}. Удобно сейчас говорить?',
+  objections: [
+    '«Не сейчас, перезвоните позже» — Хорошо, когда вам будет удобнее? Зафиксирую точное время звонка.',
+    '«Мне это не нужно» — Уточните, пожалуйста, что именно не подходит — возможно, есть более удобный вариант.',
+    '«Дорого» — Давайте покажу, что входит в стоимость и какие есть варианты подешевле.',
+  ],
+  closing: 'Отлично, фиксирую вашу заявку. В ближайшее время наш специалист свяжется с вами для уточнения деталей. Спасибо за ваше время!',
+}
+
 export default function LeadsPage() {
   const supabase = createClient()
   const toast = useToast()
@@ -36,6 +84,13 @@ export default function LeadsPage() {
   const [modalStatus, setModalStatus] = useState<LeadStatus>('new')
   const [modalNotes, setModalNotes] = useState('')
   const [saving, setSaving] = useState(false)
+
+  // Call script / quick actions widget
+  const [showScript, setShowScript] = useState(false)
+  const [applyingOutcome, setApplyingOutcome] = useState<CallOutcome | null>(null)
+  const [showCallbackPicker, setShowCallbackPicker] = useState(false)
+  const [callbackAt, setCallbackAt] = useState('')
+  const [assigning, setAssigning] = useState(false)
 
   const loadLeads = async () => {
     setLoading(true)
@@ -71,10 +126,16 @@ export default function LeadsPage() {
     setSelectedLead(lead)
     setModalStatus(lead.status)
     setModalNotes(lead.notes ?? '')
+    setShowScript(false)
+    setShowCallbackPicker(false)
+    setCallbackAt('')
   }
 
   const closeModal = () => {
     setSelectedLead(null)
+    setShowScript(false)
+    setShowCallbackPicker(false)
+    setCallbackAt('')
   }
 
   const saveLead = async () => {
@@ -94,6 +155,138 @@ export default function LeadsPage() {
     )
     toast.success('Изменения сохранены')
     closeModal()
+  }
+
+  const assignLeadManually = async (lead: Lead) => {
+    setAssigning(true)
+    const res = await fetch('/api/leads/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ leadId: lead.id }),
+    })
+    const body = await res.json()
+    setAssigning(false)
+    if (!res.ok) {
+      toast.error(body.error ?? 'Не удалось назначить лид')
+      return
+    }
+    setLeads(prev =>
+      prev.map(l => (l.id === lead.id ? { ...l, assigned_to: body.assignedTo, assigned_at: new Date().toISOString() } : l))
+    )
+    if (selectedLead?.id === lead.id) {
+      setSelectedLead(prev => (prev ? { ...prev, assigned_to: body.assignedTo, assigned_at: new Date().toISOString() } : prev))
+    }
+    toast.success(`Назначено: ${assigneeName(body.assignedTo)}`)
+  }
+
+  // Post-call quick action: updates the lead's status, logs the call, and —
+  // depending on outcome — opens a follow-up task or converts the lead into
+  // a real deal (contact + deal row) so it enters the pipeline.
+  const applyOutcome = async (outcome: CallOutcome, callbackIso?: string) => {
+    if (!selectedLead) return
+    setApplyingOutcome(outcome)
+
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) {
+      setApplyingOutcome(null)
+      return
+    }
+
+    const newStatus = OUTCOME_CONFIG[outcome].status
+    const stamp = new Date().toLocaleString('ru-RU', {
+      day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+    })
+    const noteAddition = `[${stamp}] Звонок: ${OUTCOME_CONFIG[outcome].label}`
+    const combinedNotes = [modalNotes.trim(), noteAddition].filter(Boolean).join('\n')
+
+    let dealId: string | null = null
+
+    if (outcome === 'qualified') {
+      const { data: contact } = await supabase
+        .from('contacts')
+        .insert({
+          user_id: user.id,
+          name: selectedLead.full_name ?? 'Без имени',
+          phone: selectedLead.phone_number,
+          email: selectedLead.email,
+        })
+        .select()
+        .single()
+
+      const { data: firstStatus } = await supabase
+        .from('pipeline_statuses')
+        .select('id')
+        .eq('user_id', user.id)
+        .order('position')
+        .limit(1)
+        .maybeSingle()
+
+      const { data: deal, error: dealError } = await supabase
+        .from('deals')
+        .insert({
+          user_id: user.id,
+          contact_id: contact?.id ?? null,
+          title: selectedLead.full_name ?? 'Новая сделка',
+          amount: 0,
+          status_id: firstStatus?.id ?? null,
+          lead_id: selectedLead.id,
+        })
+        .select()
+        .single()
+
+      if (dealError) {
+        toast.error('Не удалось создать сделку')
+        setApplyingOutcome(null)
+        return
+      }
+      dealId = deal?.id ?? null
+    }
+
+    const { error: leadError } = await supabase
+      .from('leads')
+      .update({ status: newStatus, notes: combinedNotes })
+      .eq('id', selectedLead.id)
+
+    if (leadError) {
+      toast.error('Не удалось сохранить результат звонка')
+      setApplyingOutcome(null)
+      return
+    }
+
+    await supabase.from('call_logs').insert({
+      user_id: user.id,
+      lead_id: selectedLead.id,
+      deal_id: dealId,
+      direction: 'outgoing',
+      duration_seconds: 0,
+      status: outcome === 'no_answer' ? 'no_answer' : 'answered',
+    })
+
+    if (outcome === 'no_answer') {
+      await supabase.from('tasks').insert({
+        user_id: user.id,
+        deal_id: dealId,
+        title: `Перезвонить: ${selectedLead.full_name ?? 'лид без имени'}`,
+        due_date: isoMinutesFromNow(120),
+      })
+    } else if (outcome === 'callback' && callbackIso) {
+      await supabase.from('tasks').insert({
+        user_id: user.id,
+        deal_id: dealId,
+        title: `Запланированный звонок: ${selectedLead.full_name ?? 'лид без имени'}`,
+        due_date: callbackIso,
+      })
+    }
+
+    setLeads(prev =>
+      prev.map(l => (l.id === selectedLead.id ? { ...l, status: newStatus, notes: combinedNotes } : l))
+    )
+    setModalStatus(newStatus)
+    setModalNotes(combinedNotes)
+    setShowCallbackPicker(false)
+    setCallbackAt('')
+    toast.success(outcome === 'qualified' ? 'Лид переведён в сделку' : 'Результат звонка сохранён')
+    setApplyingOutcome(null)
   }
 
   return (
@@ -159,9 +352,17 @@ export default function LeadsPage() {
                     <td className="px-4 py-3 text-gray-600 md:py-3.5">{lead.email ?? '—'}</td>
                     <td className="px-4 py-3 text-gray-600 md:py-3.5">{lead.ad_name ?? '—'}</td>
                     <td className="px-4 py-3 md:py-3.5">
-                      <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_BADGE[lead.status]}`}>
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_BADGE[lead.status]}`}>
                         {STATUS_LABELS[lead.status]}
                       </span>
+                      {isStaleLead(lead) && (
+                        <span
+                          title={`Нет контакта более ${STALE_TIMEOUT_MINUTES} мин с момента назначения`}
+                          className="ml-1.5 inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600"
+                        >
+                          ⏱ Просрочен
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-600 md:py-3.5">{assigneeName(lead.assigned_to)}</td>
                     <td className="px-4 py-3 text-right text-xs text-gray-400 md:px-6 md:py-3.5">
@@ -209,10 +410,100 @@ export default function LeadsPage() {
             </div>
 
             {/* Body */}
-            <div className="space-y-4 px-6 py-5">
+            <div className="max-h-[60vh] space-y-5 overflow-y-auto px-6 py-5">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-gray-500">Ответственный</span>
-                <span className="font-medium text-gray-800">{assigneeName(selectedLead.assigned_to)}</span>
+                {selectedLead.assigned_to ? (
+                  <span className="font-medium text-gray-800">{assigneeName(selectedLead.assigned_to)}</span>
+                ) : (
+                  <button
+                    onClick={() => void assignLeadManually(selectedLead)}
+                    disabled={assigning}
+                    className="flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 disabled:opacity-50"
+                  >
+                    {assigning && <Spinner className="h-3 w-3 text-blue-700" />}
+                    {assigning ? 'Назначаем...' : 'Назначить оператора'}
+                  </button>
+                )}
+              </div>
+
+              {/* ── Call script ─────────────────────────────────── */}
+              <div className="rounded-lg border bg-gray-50">
+                <button
+                  onClick={() => setShowScript(v => !v)}
+                  className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium text-gray-700"
+                >
+                  <span className="flex items-center gap-1.5">
+                    📞 Скрипт звонка
+                  </span>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                    className={`transition-transform ${showScript ? 'rotate-180' : ''}`}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {showScript && (
+                  <div className="space-y-3 border-t px-3 py-3 text-sm text-gray-700">
+                    <div>
+                      <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-gray-400">Приветствие</p>
+                      <p className="whitespace-pre-wrap">{CALL_SCRIPT.intro}</p>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-gray-400">Работа с возражениями</p>
+                      <ul className="list-disc space-y-1 pl-4">
+                        {CALL_SCRIPT.objections.map((o, i) => <li key={i}>{o}</li>)}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-gray-400">Закрытие</p>
+                      <p className="whitespace-pre-wrap">{CALL_SCRIPT.closing}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Quick post-call actions ─────────────────────── */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-gray-700">Быстрые действия после звонка</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(Object.keys(OUTCOME_CONFIG) as CallOutcome[]).map(outcome => (
+                    <button
+                      key={outcome}
+                      onClick={() => {
+                        if (outcome === 'callback') {
+                          setShowCallbackPicker(v => !v)
+                          return
+                        }
+                        void applyOutcome(outcome)
+                      }}
+                      disabled={applyingOutcome !== null}
+                      className={`flex items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${OUTCOME_CONFIG[outcome].className}`}
+                    >
+                      {applyingOutcome === outcome && <Spinner className="h-3.5 w-3.5" />}
+                      {OUTCOME_CONFIG[outcome].label}
+                    </button>
+                  ))}
+                </div>
+
+                {showCallbackPicker && (
+                  <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+                    <input
+                      type="datetime-local"
+                      value={callbackAt}
+                      onChange={e => setCallbackAt(e.target.value)}
+                      className="flex-1 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs text-gray-900 focus:border-black focus:outline-none"
+                    />
+                    <button
+                      onClick={() => callbackAt && void applyOutcome('callback', new Date(callbackAt).toISOString())}
+                      disabled={!callbackAt || applyingOutcome !== null}
+                      className="flex-shrink-0 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:bg-amber-700 disabled:opacity-40"
+                    >
+                      {applyingOutcome === 'callback' ? 'Сохранение...' : 'Подтвердить'}
+                    </button>
+                  </div>
+                )}
+                <p className="text-[11px] text-gray-400">
+                  Действие обновит статус лида, сохранит звонок и, если нужно, создаст задачу или сделку.
+                </p>
               </div>
 
               <div className="space-y-1">

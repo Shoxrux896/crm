@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import { createClient } from '@supabase/supabase-js'
 import { escapeTelegramHtml, sendTelegramMessage } from '@/lib/telegram'
+import { assignLead } from '@/lib/leadAssignment'
 
 type MetaLeadChange = {
   field: string
@@ -87,7 +88,7 @@ async function fetchLeadDetails(leadgenId: string): Promise<MetaLeadDetails> {
   }
 }
 
-async function notifyTelegram(leadgenId: string, details: MetaLeadDetails) {
+async function notifyTelegram(leadgenId: string, details: MetaLeadDetails, assigneeName: string | null) {
   const name = escapeTelegramHtml(details.fullName ?? 'Не указано')
   const phone = escapeTelegramHtml(details.phoneNumber ?? 'Не указан')
   const leadId = escapeTelegramHtml(leadgenId)
@@ -109,8 +110,28 @@ async function notifyTelegram(leadgenId: string, details: MetaLeadDetails) {
   }
 
   lines.push(`🆔 Lead ID: ${leadId}`)
+  lines.push(
+    assigneeName
+      ? `👨‍💼 Назначено: ${escapeTelegramHtml(assigneeName)}`
+      : `⚠️ Не назначено — нет активных операторов на смене`
+  )
 
   await sendTelegramMessage(lines.join('\n'), { parseMode: 'HTML' })
+}
+
+// Best-effort label for the Telegram notification only — a failure here must
+// never stop the lead from being saved/assigned, so errors are swallowed.
+async function resolveOperatorLabel(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  operatorId: string | null
+): Promise<string | null> {
+  if (!operatorId) return null
+  try {
+    const { data } = await supabase.from('profiles').select('full_name, email').eq('id', operatorId).single()
+    return data?.full_name || data?.email || operatorId
+  } catch {
+    return operatorId
+  }
 }
 
 async function processLead(leadgenId: string) {
@@ -139,6 +160,7 @@ async function processLead(leadgenId: string) {
     console.log('Facebook webhook: duplicate delivery for already-processed lead, skipping', leadgenId)
     return
   }
+  const leadId = insertedRows[0].id as string
 
   // Meta's own webhook test tool sends leadgen_ids that don't correspond to a real
   // lead, so the Graph API replies with an "Unsupported request" error. Fall back to
@@ -166,7 +188,18 @@ async function processLead(leadgenId: string) {
     .eq('facebook_lead_id', leadgenId)
   if (updateError) throw updateError
 
-  await notifyTelegram(leadgenId, details)
+  // Auto-assign to whichever on-shift operator has the fewest active leads.
+  // A failure here must not lose the lead itself — log and fall through to
+  // notifying with "unassigned" rather than throwing.
+  let assigneeName: string | null = null
+  try {
+    const { assignedTo } = await assignLead(supabase, leadId)
+    assigneeName = await resolveOperatorLabel(supabase, assignedTo)
+  } catch (err) {
+    console.error('Failed to auto-assign Facebook lead', leadgenId, err)
+  }
+
+  await notifyTelegram(leadgenId, details, assigneeName)
 }
 
 export async function GET(request: Request) {
