@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/reassign-stale-leads",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
